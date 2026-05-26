@@ -1,0 +1,52 @@
+{
+  "name": "@grexie/signals-client",
+  "version": "0.1.0",
+  "description": "Typed Node.js client for Grexie Signals websocket subscriptions and position management.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "keywords": [
+    "grexie",
+    "signals",
+    "websocket",
+    "trading",
+    "position-management"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/grexie/signals-client-node.git"
+  },
+  "bugs": {
+    "url": "https://github.com/grexie/signals-client-node/issues"
+  },
+  "homepage": "https://github.com/grexie/signals-client-node#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.17.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "@types/ws": "^8.5.10",
+    "typescript": "^5.5.4",
+    "vitest": "^1.6.0"
+  }
+}
