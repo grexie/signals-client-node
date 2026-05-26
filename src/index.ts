@@ -25,6 +25,26 @@ export interface Signal {
   stopLoss: number;
   score?: number;
   components?: SignalComponent[];
+  modelVariant?: string;
+  modelVersion?: string;
+  predictionMode?: string;
+  confidenceMapping?: string;
+  upProbability?: number;
+  downProbability?: number;
+  directionalEdge?: number;
+  normalizedEdge?: number;
+  expectedValue?: number;
+  regime?: string;
+  regimeConfidence?: number;
+  volatilityState?: string;
+  squeezeState?: string;
+  trendState?: string;
+  atrPercent?: number;
+  signalTTL?: number;
+  generatedAt?: string | Date;
+  artifactID?: string;
+  artifactVersion?: string;
+  rejectedReason?: string;
   timestamp?: string | Date;
   price?: number;
 }
@@ -86,6 +106,10 @@ export type SignalsEvent =
   | InfoEvent
   | SignalEvent
   | ErrorEvent;
+
+export interface SignalEventSource {
+  events(signal?: AbortSignal): AsyncIterable<SignalsEvent>;
+}
 
 export interface SignalsClientOptions {
   url?: string;
@@ -493,6 +517,7 @@ export interface Order {
   leverage: number;
   takeProfit?: number;
   stopLoss?: number;
+  reduceOnly?: boolean;
   timestamp: Date;
   subscriptionId?: number;
   replay?: boolean;
@@ -574,14 +599,14 @@ export function productionPositionManagerConfig(overrides: PositionManagerConfig
 }
 
 export class PositionManager {
-  private readonly client?: SignalsClient;
+  private readonly client?: SignalEventSource;
   private readonly config: Required<PositionManagerConfig>;
   private readonly assets: AssetManager;
   private readonly instrumentMetadata: InstrumentManager;
   private readonly positionsByKey = new Map<string, Position>();
   private readonly closed: ClosedTrade[] = [];
 
-  constructor(client?: SignalsClient, config: PositionManagerConfig = productionPositionManagerConfig()) {
+  constructor(client?: SignalEventSource, config: PositionManagerConfig = productionPositionManagerConfig()) {
     this.client = client;
     this.config = normalizeConfig(config);
     this.assets = config.assetManager ?? new AssetManager();
@@ -1068,6 +1093,7 @@ export class PositionManager {
     }
     if (executableAbsDelta > requestedAbsDelta) executableAbsDelta = requestedAbsDelta;
     const executableDelta = sign(delta) * executableAbsDelta;
+    const reduceOnly = isExposureReduction(position.size, position.size + executableDelta);
     return {
       venue: position.venue,
       instrument: position.instrument,
@@ -1090,6 +1116,7 @@ export class PositionManager {
       lotSize: metadata.lotSize,
       tickSize: metadata.tickSize,
       leverage,
+      reduceOnly,
       timestamp: now
     };
   }

@@ -805,6 +805,7 @@ export class PositionManager {
         if (executableAbsDelta > requestedAbsDelta)
             executableAbsDelta = requestedAbsDelta;
         const executableDelta = sign(delta) * executableAbsDelta;
+        const reduceOnly = isExposureReduction(position.size, position.size + executableDelta);
         return {
             venue: position.venue,
             instrument: position.instrument,
@@ -827,6 +828,7 @@ export class PositionManager {
             lotSize: metadata.lotSize,
             tickSize: metadata.tickSize,
             leverage,
+            reduceOnly,
             timestamp: now
         };
     }

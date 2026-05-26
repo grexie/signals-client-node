@@ -22,6 +22,26 @@ export interface Signal {
     stopLoss: number;
     score?: number;
     components?: SignalComponent[];
+    modelVariant?: string;
+    modelVersion?: string;
+    predictionMode?: string;
+    confidenceMapping?: string;
+    upProbability?: number;
+    downProbability?: number;
+    directionalEdge?: number;
+    normalizedEdge?: number;
+    expectedValue?: number;
+    regime?: string;
+    regimeConfidence?: number;
+    volatilityState?: string;
+    squeezeState?: string;
+    trendState?: string;
+    atrPercent?: number;
+    signalTTL?: number;
+    generatedAt?: string | Date;
+    artifactID?: string;
+    artifactVersion?: string;
+    rejectedReason?: string;
     timestamp?: string | Date;
     price?: number;
 }
@@ -70,6 +90,9 @@ export interface ErrorEvent {
     message?: string;
 }
 export type SignalsEvent = ReadyEvent | SubscribedEvent | UnsubscribedEvent | InfoEvent | SignalEvent | ErrorEvent;
+export interface SignalEventSource {
+    events(signal?: AbortSignal): AsyncIterable<SignalsEvent>;
+}
 export interface SignalsClientOptions {
     url?: string;
     baseUrl?: string;
@@ -188,6 +211,7 @@ export interface Order {
     leverage: number;
     takeProfit?: number;
     stopLoss?: number;
+    reduceOnly?: boolean;
     timestamp: Date;
     subscriptionId?: number;
     replay?: boolean;
@@ -254,7 +278,7 @@ export declare class PositionManager {
     private readonly instrumentMetadata;
     private readonly positionsByKey;
     private readonly closed;
-    constructor(client?: SignalsClient, config?: PositionManagerConfig);
+    constructor(client?: SignalEventSource, config?: PositionManagerConfig);
     assetManager(): AssetManager;
     instrumentManager(): InstrumentManager;
     run(signal?: AbortSignal): AsyncIterableIterator<Order>;
