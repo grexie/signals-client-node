@@ -80,6 +80,8 @@ The sizing model follows the production Grexie Signals server:
 - `positionSize` is the total portfolio budget across all active positions;
 - confidence is stored separately from position size;
 - positions are rebalanced by confidence weight;
+- reductions, closes, and first-phase flips are emitted before openings or increases;
+- openings and increases are capped by live `AssetManager` available exposure when asset snapshots are attached;
 - `minOrderDelta` is scaled by `positionSize`, so a `0.20` order threshold with a `0.10` portfolio budget becomes `0.02`;
 - same-side churn can be suppressed with `rebalanceIntervalMs`, while opposite-side signals can still flip positions;
 - maker/taker fees and per-instrument overrides feed estimated fees and realized PnL;

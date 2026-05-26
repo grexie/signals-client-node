@@ -556,12 +556,18 @@ export class PositionManager {
                 totalWeight += weight;
         }
         const usedBudget = Math.min(this.config.positionSize, totalWeight);
-        const orders = [];
-        for (const [key, position] of this.positionsByKey) {
+        const reductions = [];
+        const openings = [];
+        for (const key of [...this.positionsByKey.keys()].sort()) {
+            const position = this.positionsByKey.get(key);
+            if (!position)
+                continue;
             const weight = weights.get(key) ?? 0;
             const side = sides.get(key) ?? 0;
             const targetSize = totalWeight > 0 ? side * usedBudget * weight / totalWeight : 0;
-            const delta = targetSize - position.size;
+            let delta = targetSize - position.size;
+            if (isFlipTarget(position.size, targetSize))
+                delta = -position.size;
             if (Math.abs(delta) <= 1e-9) {
                 position.confidence = weight;
                 continue;
@@ -572,18 +578,68 @@ export class PositionManager {
                 continue;
             }
             const context = contexts[key] ?? { confidence: position.confidence, expectedEdge: 0 };
-            const order = this.orderForDelta(key, position, delta, context.expectedEdge, context.score, orderReason(position, targetSize), now, context.confidence);
-            order.takeProfit = context.takeProfit;
-            order.stopLoss = context.stopLoss;
-            if (!this.orderMeetsInstrumentMinimum(order))
+            const candidate = {
+                key,
+                position,
+                delta,
+                weight,
+                context,
+                reason: orderReason(position, targetSize)
+            };
+            if (isExposureReduction(position.size, position.size + delta)) {
+                reductions.push(candidate);
+            }
+            else {
+                openings.push(candidate);
+            }
+        }
+        if (reductions.length > 0)
+            return this.materializeRebalanceOrders(reductions, now);
+        return this.materializeRebalanceOrders(openings, now, new Map());
+    }
+    materializeRebalanceOrders(candidates, now, openingExposureByCurrency) {
+        const orders = [];
+        for (const candidate of candidates) {
+            let delta = candidate.delta;
+            if (openingExposureByCurrency && !isExposureReduction(candidate.position.size, candidate.position.size + delta)) {
+                const metadata = this.instrumentFor(candidate.position.venue, candidate.position.instrument);
+                const used = openingExposureByCurrency.get(metadata.settlementCurrency) ?? 0;
+                const available = this.availableExposureBudget(metadata.settlementCurrency) - used;
+                if (available <= 1e-9) {
+                    candidate.position.confidence = candidate.weight;
+                    continue;
+                }
+                if (Math.abs(delta) > available)
+                    delta = sign(delta) * available;
+            }
+            const order = this.orderForDelta(candidate.key, candidate.position, delta, candidate.context.expectedEdge, candidate.context.score, candidate.reason, now, candidate.context.confidence);
+            order.takeProfit = candidate.context.takeProfit;
+            order.stopLoss = candidate.context.stopLoss;
+            if (!this.orderMeetsInstrumentMinimum(order)) {
+                candidate.position.confidence = candidate.weight;
                 continue;
+            }
             orders.push(order);
-            this.applyDelta(key, position, delta, position.lastPrice ?? position.entryPrice, this.takerFeeRate(key), now);
-            const current = this.positionsByKey.get(key);
+            if (openingExposureByCurrency && !isExposureReduction(order.previousSize, order.targetSize)) {
+                openingExposureByCurrency.set(order.settlementCurrency, (openingExposureByCurrency.get(order.settlementCurrency) ?? 0) + Math.abs(order.sizeDelta));
+            }
+            this.applyDelta(candidate.key, candidate.position, delta, candidate.position.lastPrice ?? candidate.position.entryPrice, this.takerFeeRate(candidate.key), now);
+            const current = this.positionsByKey.get(candidate.key);
             if (current)
-                current.confidence = weight;
+                current.confidence = candidate.weight;
         }
         return orders;
+    }
+    availableExposureBudget(currency) {
+        const asset = this.assets.asset(currency);
+        if (!asset)
+            return Number.POSITIVE_INFINITY;
+        const equity = positiveOr(asset.equity, asset.cash + asset.used, asset.cash);
+        if (equity <= 0)
+            return asset.available > 0 ? Number.POSITIVE_INFINITY : 0;
+        if (asset.available <= 0)
+            return 0;
+        return Math.max(0, asset.available / equity);
     }
     shouldSkipRebalanceDelta(position, targetSize, delta, now, hasOverride) {
         const isClosing = Math.abs(targetSize) <= 1e-9 && Math.abs(position.size) > 1e-9;
@@ -878,6 +934,18 @@ function orderReason(position, targetSize) {
     if (!sameSign(position.size, targetSize))
         return "flip";
     return "rebalance";
+}
+function isFlipTarget(previousSize, targetSize) {
+    return Math.abs(previousSize) > 1e-9 && Math.abs(targetSize) > 1e-9 && !sameSign(previousSize, targetSize);
+}
+function isExposureReduction(previousSize, targetSize) {
+    if (Math.abs(previousSize) <= 1e-9)
+        return false;
+    if (Math.abs(targetSize) <= 1e-9)
+        return true;
+    if (!sameSign(previousSize, targetSize))
+        return true;
+    return Math.abs(targetSize) < Math.abs(previousSize) - 1e-9;
 }
 function blendRisk(current, incoming, gate) {
     if (current <= 0)

@@ -157,7 +157,23 @@ describe("PositionManager", () => {
     expect(sell).toHaveLength(1);
     expect(sell[0]?.side).toBe("sell");
     expect(sell[0]?.reason).toBe("flip");
-    expect(sell[0]?.sizeDelta).toBeLessThan(-0.19);
+    expect(sell[0]?.targetSize).toBeCloseTo(0);
+    expect(sell[0]?.sizeDelta).toBeCloseTo(-0.1);
+
+    const openShort = manager.handleSignal({
+      venue: "okx",
+      instrument: "BTC-USDT-SWAP",
+      side: "sell",
+      confidence: 0.9,
+      takeProfit: 0.02,
+      stopLoss: 0.004,
+      score: -0.6,
+      price: 99,
+      timestamp: "2026-05-26T00:02:00Z"
+    });
+    expect(openShort).toHaveLength(1);
+    expect(openShort[0]?.side).toBe("sell");
+    expect(openShort[0]?.reason).toBe("opening");
   });
 
   it("scales min order delta by configured position size", () => {
@@ -343,6 +359,83 @@ describe("PositionManager", () => {
       stopLoss: 0.004,
       price: 100
     })).toHaveLength(0);
+  });
+
+  it("phases reductions before openings", () => {
+    const assets = new AssetManager();
+    assets.updateAsset({ currency: "USDT", cash: 1000, available: 1000, equity: 1000 });
+    const instruments = new InstrumentManager();
+    instruments.updateInstrument({ venue: "okx", instrument: "BTC-USDT-SWAP", settlementCurrency: "USDT" });
+    instruments.updateInstrument({ venue: "okx", instrument: "ETH-USDT-SWAP", settlementCurrency: "USDT" });
+    const manager = new PositionManager(undefined, productionPositionManagerConfig({
+      positionSize: 0.2,
+      minExpectedEdge: 0,
+      minOrderDelta: 0,
+      assetManager: assets,
+      instrumentManager: instruments
+    }));
+    manager.addPosition({
+      venue: "okx",
+      instrument: "BTC-USDT-SWAP",
+      size: 0.15,
+      confidence: 1,
+      entryPrice: 100,
+      lastPrice: 100
+    });
+    const reductions = manager.handleSignal({
+      venue: "okx",
+      instrument: "ETH-USDT-SWAP",
+      side: "buy",
+      confidence: 1,
+      takeProfit: 0.02,
+      stopLoss: 0.004,
+      price: 100,
+      timestamp: "2026-05-26T00:00:00Z"
+    });
+    expect(reductions).toHaveLength(1);
+    expect(reductions[0]?.instrument).toBe("BTC-USDT-SWAP");
+    expect(reductions[0]?.side).toBe("sell");
+    expect(reductions[0]?.targetSize).toBeCloseTo(0.1);
+
+    const openings = manager.handleSignal({
+      venue: "okx",
+      instrument: "ETH-USDT-SWAP",
+      side: "buy",
+      confidence: 1,
+      takeProfit: 0.02,
+      stopLoss: 0.004,
+      price: 100,
+      timestamp: "2026-05-26T00:01:00Z"
+    });
+    expect(openings).toHaveLength(1);
+    expect(openings[0]?.instrument).toBe("ETH-USDT-SWAP");
+    expect(openings[0]?.side).toBe("buy");
+  });
+
+  it("caps openings to available exposure", () => {
+    const assets = new AssetManager();
+    assets.updateAsset({ currency: "USDT", cash: 1000, available: 50, equity: 1000 });
+    const instruments = new InstrumentManager();
+    instruments.updateInstrument({ venue: "okx", instrument: "BTC-USDT-SWAP", settlementCurrency: "USDT" });
+    const manager = new PositionManager(undefined, productionPositionManagerConfig({
+      positionSize: 0.2,
+      minExpectedEdge: 0,
+      minOrderDelta: 0,
+      assetManager: assets,
+      instrumentManager: instruments
+    }));
+    const orders = manager.handleSignal({
+      venue: "okx",
+      instrument: "BTC-USDT-SWAP",
+      side: "buy",
+      confidence: 1,
+      takeProfit: 0.02,
+      stopLoss: 0.004,
+      price: 100
+    });
+    expect(orders).toHaveLength(1);
+    expect(orders[0]?.sizeDelta).toBeCloseTo(0.05);
+    expect(orders[0]?.targetSize).toBeCloseTo(0.05);
   });
 
   it("reports stats by instrument and settlement currency", () => {

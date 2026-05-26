@@ -268,6 +268,8 @@ export declare class PositionManager {
     handleEvent(event: SignalsEvent): Order[];
     handleSignal(signal: Signal): Order[];
     private rebalance;
+    private materializeRebalanceOrders;
+    private availableExposureBudget;
     private shouldSkipRebalanceDelta;
     private orderForDelta;
     private applyDelta;
