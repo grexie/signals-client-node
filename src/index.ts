@@ -623,7 +623,8 @@ export class PositionManager {
     const now = new Date();
     const delta = -position.size;
     const order = this.orderForDelta(key, position, delta, 0, undefined, "closing", now, position.confidence);
-    this.applyDelta(key, position, delta, position.lastPrice ?? position.entryPrice, this.takerFeeRate(key), now);
+    if (!this.orderMeetsInstrumentMinimum(order)) return [];
+    this.applyDelta(key, position, order.sizeDelta, position.lastPrice ?? position.entryPrice, this.takerFeeRate(key), now);
     return [order];
   }
 
@@ -737,10 +738,13 @@ export class PositionManager {
     const delta = -position.size;
     const order = this.orderForDelta(key, position, delta, 0, undefined, reason, timestamp, position.confidence);
     order.feeRate = feeRate;
-    order.estimatedFee = Math.abs(delta) * feeRate;
+    const metadata = this.instrumentFor(position.venue, position.instrument);
+    const asset = this.assets.asset(metadata.settlementCurrency);
+    const equity = positiveOr(asset?.equity, (asset?.cash ?? 0) + (asset?.used ?? 0), 1);
+    order.estimatedFee = feeExposureForNotional(order.notional, feeRate, equity);
     order.estimatedFeeValue = order.notional * feeRate;
     if (!this.orderMeetsInstrumentMinimum(order)) return [];
-    this.applyDelta(key, position, delta, price, feeRate, timestamp);
+    this.applyDelta(key, position, order.sizeDelta, price, feeRate, timestamp);
     return [order];
   }
 
@@ -772,7 +776,7 @@ export class PositionManager {
     if (this.config.minExpectedEdge > 0 && edge < this.config.minExpectedEdge) return [];
 
     let position = this.positionsByKey.get(key);
-    const targetSize = targetSign * this.config.positionSize * targetConfidence;
+    const targetSize = targetSign * this.config.positionSize;
     const minOrderDelta = this.effectiveMinOrderDelta();
     if (!position || Math.abs(position.size) <= 1e-9) {
       if (Math.abs(targetSize) < minOrderDelta) return [];
@@ -824,7 +828,6 @@ export class PositionManager {
   private rebalance(now: Date, sideOverrides: Record<string, number>, contexts: Record<string, SignalContext>): Order[] {
     const weights = new Map<string, number>();
     const sides = new Map<string, number>();
-    let totalWeight = 0;
     for (const [key, position] of this.positionsByKey) {
       if (Math.abs(position.size) <= 1e-9 && position.confidence <= 0) continue;
       const hasOverride = Object.hasOwn(sideOverrides, key);
@@ -834,17 +837,15 @@ export class PositionManager {
       if (hasOverride) side = sideOverrides[key] ?? side;
       weights.set(key, weight);
       sides.set(key, side);
-      if (weight > 1e-9 && side !== 0) totalWeight += weight;
     }
-    const usedBudget = Math.min(this.config.positionSize, totalWeight);
+    const targets = this.allocateTargetSizes([...this.positionsByKey.keys()].sort(), weights, sides, contexts);
     const reductions: RebalanceCandidate[] = [];
     const openings: RebalanceCandidate[] = [];
     for (const key of [...this.positionsByKey.keys()].sort()) {
       const position = this.positionsByKey.get(key);
       if (!position) continue;
       const weight = weights.get(key) ?? 0;
-      const side = sides.get(key) ?? 0;
-      const targetSize = totalWeight > 0 ? side * usedBudget * weight / totalWeight : 0;
+      const targetSize = targets.get(key) ?? 0;
       let delta = targetSize - position.size;
       if (isFlipTarget(position.size, targetSize)) delta = -position.size;
       if (Math.abs(delta) <= 1e-9) {
@@ -875,6 +876,70 @@ export class PositionManager {
     return this.materializeRebalanceOrders(openings, now, new Map<string, number>());
   }
 
+  private allocateTargetSizes(keys: string[], weights: Map<string, number>, sides: Map<string, number>, contexts: Record<string, SignalContext>): Map<string, number> {
+    const targets = new Map<string, number>();
+    if (this.config.positionSize <= 0) return targets;
+    const active = new Set(keys.filter((key) => (weights.get(key) ?? 0) > 1e-9 && (sides.get(key) ?? 0) !== 0));
+    while (active.size > 0) {
+      const totalWeight = [...active].reduce((sum, key) => sum + (weights.get(key) ?? 0), 0);
+      if (totalWeight <= 1e-9) break;
+      let dropped = "";
+      let droppedWeight = Number.POSITIVE_INFINITY;
+      for (const key of keys) {
+        if (!active.has(key)) continue;
+        const position = this.positionsByKey.get(key);
+        if (!position) continue;
+        const desiredBudget = this.config.positionSize * (weights.get(key) ?? 0) / totalWeight;
+        if (this.executableAllocationForBudget(key, position, desiredBudget, contexts[key]).margin > 1e-9) continue;
+        const weight = weights.get(key) ?? 0;
+        if (weight < droppedWeight || (Math.abs(weight - droppedWeight) <= 1e-9 && (dropped === "" || key < dropped))) {
+          dropped = key;
+          droppedWeight = weight;
+        }
+      }
+      if (!dropped) break;
+      active.delete(dropped);
+    }
+    if (active.size === 0) return targets;
+
+    const totalWeight = [...active].reduce((sum, key) => sum + (weights.get(key) ?? 0), 0);
+    if (totalWeight <= 1e-9) return targets;
+    let allocated = 0;
+    for (const key of keys) {
+      if (!active.has(key)) continue;
+      const position = this.positionsByKey.get(key);
+      if (!position) continue;
+      const desiredBudget = this.config.positionSize * (weights.get(key) ?? 0) / totalWeight;
+      const executable = this.executableAllocationForBudget(key, position, desiredBudget, contexts[key]);
+      if (executable.margin <= 1e-9) continue;
+      targets.set(key, (sides.get(key) ?? 0) * executable.margin);
+      allocated += executable.margin + executable.fee;
+    }
+
+    let free = this.config.positionSize - allocated;
+    if (free <= 1e-9) return targets;
+    const priority = [...keys].sort((a, b) => {
+      const diff = (weights.get(b) ?? 0) - (weights.get(a) ?? 0);
+      return Math.abs(diff) <= 1e-9 ? a.localeCompare(b) : diff;
+    });
+    for (const key of priority) {
+      if (!active.has(key) || free <= 1e-9) continue;
+      const position = this.positionsByKey.get(key);
+      if (!position) continue;
+      const step = this.executableLotStepCost(key, position, contexts[key]);
+      const stepCost = step.margin + step.fee;
+      if (stepCost <= 1e-9) {
+        targets.set(key, (targets.get(key) ?? 0) + (sides.get(key) ?? 0) * free);
+        break;
+      }
+      const steps = Math.floor((free + 1e-9) / stepCost);
+      if (steps <= 0) continue;
+      targets.set(key, (targets.get(key) ?? 0) + (sides.get(key) ?? 0) * steps * step.margin);
+      free -= steps * stepCost;
+    }
+    return targets;
+  }
+
   private materializeRebalanceOrders(candidates: RebalanceCandidate[], now: Date, openingExposureByCurrency?: Map<string, number>): Order[] {
     const orders: Order[] = [];
     for (const candidate of candidates) {
@@ -887,7 +952,11 @@ export class PositionManager {
           candidate.position.confidence = candidate.weight;
           continue;
         }
-        if (Math.abs(delta) > available) delta = sign(delta) * available;
+        delta = this.capOpeningDeltaToBudget(candidate.key, candidate.position, delta, candidate.context, available);
+        if (Math.abs(delta) <= 1e-9) {
+          candidate.position.confidence = candidate.weight;
+          continue;
+        }
       }
       const order = this.orderForDelta(
         candidate.key,
@@ -907,9 +976,9 @@ export class PositionManager {
       }
       orders.push(order);
       if (openingExposureByCurrency && !isExposureReduction(order.previousSize, order.targetSize)) {
-        openingExposureByCurrency.set(order.settlementCurrency, (openingExposureByCurrency.get(order.settlementCurrency) ?? 0) + Math.abs(order.sizeDelta));
+        openingExposureByCurrency.set(order.settlementCurrency, (openingExposureByCurrency.get(order.settlementCurrency) ?? 0) + orderBudgetCost(order));
       }
-      this.applyDelta(candidate.key, candidate.position, delta, candidate.position.lastPrice ?? candidate.position.entryPrice, this.takerFeeRate(candidate.key), now);
+      this.applyDelta(candidate.key, candidate.position, order.sizeDelta, candidate.position.lastPrice ?? candidate.position.entryPrice, this.takerFeeRate(candidate.key), now);
       const current = this.positionsByKey.get(candidate.key);
       if (current) current.confidence = candidate.weight;
     }
@@ -923,6 +992,50 @@ export class PositionManager {
     if (equity <= 0) return asset.available > 0 ? Number.POSITIVE_INFINITY : 0;
     if (asset.available <= 0) return 0;
     return Math.max(0, asset.available / equity);
+  }
+
+  private executableAllocationForBudget(key: string, position: Position, budget: number, context?: SignalContext): ExecutableAllocation {
+    if (budget <= 1e-9) return { margin: 0, fee: 0 };
+    const metadata = this.instrumentFor(position.venue, position.instrument);
+    const asset = this.assets.asset(metadata.settlementCurrency);
+    const equity = positiveOr(asset?.equity, (asset?.cash ?? 0) + (asset?.used ?? 0), 1);
+    const price = roundToTick(position.lastPrice ?? position.entryPrice ?? 0, metadata.tickSize);
+    const leverage = this.selectLeverage(key, context?.confidence ?? position.confidence, context?.expectedEdge ?? 0, context?.score);
+    if (price <= 0 || equity <= 0 || leverage <= 0) return { margin: 0, fee: 0 };
+    const feeRate = this.takerFeeRate(key);
+    const feeMultiplier = Math.max(1 + leverage * feeRate, 1);
+    const maxMargin = budget / feeMultiplier;
+    const quantity = roundDownToStep(maxMargin * equity * leverage / price, metadata.lotSize);
+    if (quantity <= 1e-9) return { margin: 0, fee: 0 };
+    if (metadata.minSize > 0 && quantity < metadata.minSize) return { margin: 0, fee: 0 };
+    const margin = quantity * price / (equity * leverage);
+    const fee = quantity * price * feeRate / equity;
+    if (margin + fee > budget + 1e-9) return { margin: 0, fee: 0 };
+    return { margin, fee };
+  }
+
+  private executableLotStepCost(key: string, position: Position, context?: SignalContext): ExecutableAllocation {
+    const metadata = this.instrumentFor(position.venue, position.instrument);
+    if (metadata.lotSize <= 0) return { margin: 0, fee: 0 };
+    const asset = this.assets.asset(metadata.settlementCurrency);
+    const equity = positiveOr(asset?.equity, (asset?.cash ?? 0) + (asset?.used ?? 0), 1);
+    const price = roundToTick(position.lastPrice ?? position.entryPrice ?? 0, metadata.tickSize);
+    const leverage = this.selectLeverage(key, context?.confidence ?? position.confidence, context?.expectedEdge ?? 0, context?.score);
+    if (price <= 0 || equity <= 0 || leverage <= 0) return { margin: 0, fee: 0 };
+    return {
+      margin: metadata.lotSize * price / (equity * leverage),
+      fee: metadata.lotSize * price * this.takerFeeRate(key) / equity
+    };
+  }
+
+  private capOpeningDeltaToBudget(key: string, position: Position, delta: number, context: SignalContext, budget: number): number {
+    if (Math.abs(delta) <= 1e-9 || budget <= 1e-9) return 0;
+    const executable = this.executableAllocationForBudget(key, position, budget, context);
+    if (executable.margin <= 1e-9) return 0;
+    if (executable.margin < Math.abs(delta)) return sign(delta) * executable.margin;
+    const order = this.orderForDelta(key, position, delta, context.expectedEdge, context.score, "budget-check", new Date(), context.confidence);
+    if (orderBudgetCost(order) > budget + 1e-9) return sign(delta) * executable.margin;
+    return delta;
   }
 
   private shouldSkipRebalanceDelta(position: Position, targetSize: number, delta: number, now: Date, hasOverride: boolean): boolean {
@@ -945,23 +1058,30 @@ export class PositionManager {
     const asset = this.assets.asset(metadata.settlementCurrency);
     const equity = positiveOr(asset?.equity, (asset?.cash ?? 0) + (asset?.used ?? 0), 1);
     const price = roundToTick(position.lastPrice ?? position.entryPrice ?? 0, metadata.tickSize);
-    let notional = Math.abs(delta) * equity * leverage;
+    const requestedAbsDelta = Math.abs(delta);
+    let notional = requestedAbsDelta * equity * leverage;
     const quantity = price > 0 ? roundDownToStep(notional / price, metadata.lotSize) : 0;
     notional = quantity * price;
+    let executableAbsDelta = requestedAbsDelta;
+    if (equity > 0 && leverage > 0 && price > 0) {
+      executableAbsDelta = notional / (equity * leverage);
+    }
+    if (executableAbsDelta > requestedAbsDelta) executableAbsDelta = requestedAbsDelta;
+    const executableDelta = sign(delta) * executableAbsDelta;
     return {
       venue: position.venue,
       instrument: position.instrument,
       side: delta < 0 ? "sell" : "buy",
       reason,
-      sizeDelta: delta,
+      sizeDelta: executableDelta,
       previousSize: position.size,
-      targetSize: position.size + delta,
+      targetSize: position.size + executableDelta,
       price,
       confidence,
       score,
       expectedEdge: edge,
       feeRate,
-      estimatedFee: Math.abs(delta) * feeRate,
+      estimatedFee: feeExposureForNotional(notional, feeRate, equity),
       estimatedFeeValue: notional * feeRate,
       quantity,
       notional,
@@ -986,7 +1106,7 @@ export class PositionManager {
         position.lastPrice = price;
       }
       if (opened) position.openedAt = now;
-      const fee = Math.abs(delta) * feeRate;
+      const fee = feeExposureForMargin(Math.abs(delta), positiveOr(position.leverage, this.minLeverage(key), 1), feeRate);
       position.fees = (position.fees ?? 0) + fee;
       position.realizedPnl = (position.realizedPnl ?? 0) - fee;
       position.size += delta;
@@ -995,7 +1115,7 @@ export class PositionManager {
     if (price && price > 0) position.lastPrice = price;
     const closing = Math.min(Math.abs(position.size), Math.abs(delta));
     const gross = move(position) * closing;
-    const fee = closing * feeRate;
+    const fee = feeExposureForMargin(closing, positiveOr(position.leverage, this.minLeverage(key), 1), feeRate);
     position.realizedGross = (position.realizedGross ?? 0) + gross;
     position.fees = (position.fees ?? 0) + fee;
     position.realizedPnl = (position.realizedPnl ?? 0) + gross - fee;
@@ -1028,7 +1148,7 @@ export class PositionManager {
     position.openedAt = now;
     position.confidence = 0;
     position.realizedGross = 0;
-    position.fees = remaining * this.takerFeeRate(key);
+    position.fees = feeExposureForMargin(remaining, positiveOr(position.leverage, this.minLeverage(key), 1), this.takerFeeRate(key));
     position.realizedPnl = -position.fees;
   }
 
@@ -1077,9 +1197,9 @@ export class PositionManager {
   }
 
   private orderMeetsInstrumentMinimum(order: Order): boolean {
+    if (order.quantity <= 0) return false;
     if (order.reason === "closing" || order.reason === "flip") return true;
     if (order.minSize > 0 && order.quantity > 0 && order.quantity < order.minSize) return false;
-    if (order.minSize > 0 && order.quantity <= 0) return false;
     return true;
   }
 }
@@ -1099,6 +1219,11 @@ interface RebalanceCandidate {
   weight: number;
   context: SignalContext;
   reason: string;
+}
+
+interface ExecutableAllocation {
+  margin: number;
+  fee: number;
 }
 
 function websocketUrlFromBase(baseUrl?: string): string | undefined {
@@ -1133,6 +1258,20 @@ function feeAdjustedExpectedEdge(signal: Signal, takerFeeRate: number): number {
 function expectedEdge(signal: Signal): number {
   const confidence = clamp01(signal.confidence);
   return confidence * Math.max(signal.takeProfit, 0) - (1 - confidence) * Math.max(signal.stopLoss, 0);
+}
+
+function orderBudgetCost(order: Order): number {
+  return Math.abs(order.sizeDelta) + Math.max(0, order.estimatedFee);
+}
+
+function feeExposureForNotional(notional: number, feeRate: number, equity: number): number {
+  if (notional <= 0 || feeRate <= 0 || equity <= 0) return 0;
+  return notional * feeRate / equity;
+}
+
+function feeExposureForMargin(margin: number, leverage: number, feeRate: number): number {
+  if (margin <= 0 || leverage <= 0 || feeRate <= 0) return 0;
+  return margin * leverage * feeRate;
 }
 
 function signalDate(timestamp: string | Date | undefined): Date {

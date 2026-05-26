@@ -3,6 +3,7 @@ import { WebSocketServer } from "ws";
 import {
   PositionManager,
   SignalsClient,
+  type Order,
   type SignalsEvent,
   AssetManager,
   InstrumentManager,
@@ -46,6 +47,11 @@ describe("parseEvent", () => {
     }))).toMatchObject({ type: "error", code: "forbidden" });
   });
 });
+
+function orderBudgetCost(order: Order | undefined): number {
+  if (!order) return 0;
+  return Math.abs(order.sizeDelta) + Math.max(0, order.estimatedFee);
+}
 
 describe("SignalsClient", () => {
   it("subscribes over an authenticated websocket", async () => {
@@ -141,7 +147,7 @@ describe("PositionManager", () => {
     expect(buy).toHaveLength(1);
     expect(buy[0]?.side).toBe("buy");
     expect(buy[0]?.reason).toBe("opening");
-    expect(buy[0]?.targetSize).toBeCloseTo(0.1);
+    expect(orderBudgetCost(buy[0])).toBeCloseTo(0.1);
 
     const sell = manager.handleSignal({
       venue: "okx",
@@ -158,7 +164,7 @@ describe("PositionManager", () => {
     expect(sell[0]?.side).toBe("sell");
     expect(sell[0]?.reason).toBe("flip");
     expect(sell[0]?.targetSize).toBeCloseTo(0);
-    expect(sell[0]?.sizeDelta).toBeCloseTo(-0.1);
+    expect(sell[0]?.sizeDelta).toBeCloseTo(-(buy[0]?.targetSize ?? 0));
 
     const openShort = manager.handleSignal({
       venue: "okx",
@@ -176,14 +182,14 @@ describe("PositionManager", () => {
     expect(openShort[0]?.reason).toBe("opening");
   });
 
-  it("scales min order delta by configured position size", () => {
+  it("uses confidence as allocation weight", () => {
     const manager = new PositionManager(undefined, productionPositionManagerConfig({
       positionSize: 0.1,
       minExpectedEdge: 0,
       minOrderDelta: 0.2
     }));
     manager.instrumentManager().updateInstrument({ venue: "okx", instrument: "DOGE-USDT-SWAP" });
-    expect(manager.handleSignal({
+    const orders = manager.handleSignal({
       venue: "okx",
       instrument: "DOGE-USDT-SWAP",
       side: "buy",
@@ -191,16 +197,43 @@ describe("PositionManager", () => {
       takeProfit: 0.02,
       stopLoss: 0.004,
       price: 0.2
-    })).toHaveLength(0);
-    expect(manager.handleSignal({
+    });
+    expect(orders).toHaveLength(1);
+    expect(orderBudgetCost(orders[0])).toBeCloseTo(0.1);
+  });
+
+  it("quantizes emitted target size to executable lots", () => {
+    const assets = new AssetManager();
+    assets.updateAsset({ currency: "USDT", equity: 1000, available: 1000 });
+    const instruments = new InstrumentManager();
+    instruments.updateInstrument({
       venue: "okx",
-      instrument: "DOGE-USDT-SWAP",
+      instrument: "BTC-USDT-SWAP",
+      settlementCurrency: "USDT",
+      lotSize: 1,
+      minSize: 1,
+      tickSize: 0.1
+    });
+    const manager = new PositionManager(undefined, productionPositionManagerConfig({
+      positionSize: 0.5,
+      minExpectedEdge: 0,
+      minOrderDelta: 0,
+      assetManager: assets,
+      instrumentManager: instruments
+    }));
+    const orders = manager.handleSignal({
+      venue: "okx",
+      instrument: "BTC-USDT-SWAP",
       side: "buy",
-      confidence: 0.25,
+      confidence: 0.15,
       takeProfit: 0.02,
       stopLoss: 0.004,
-      price: 0.2
-    })).toHaveLength(1);
+      price: 333
+    });
+    expect(orders).toHaveLength(1);
+    expect(orders[0]?.quantity).toBe(1);
+    expect(orders[0]?.sizeDelta).toBeCloseTo(0.333);
+    expect(orders[0]?.targetSize).toBeCloseTo(0.333);
   });
 
   it("ignores signals for unconfigured instruments", () => {
@@ -395,7 +428,7 @@ describe("PositionManager", () => {
     expect(reductions).toHaveLength(1);
     expect(reductions[0]?.instrument).toBe("BTC-USDT-SWAP");
     expect(reductions[0]?.side).toBe("sell");
-    expect(reductions[0]?.targetSize).toBeCloseTo(0.1);
+    expect(reductions[0]?.targetSize).toBeCloseTo(0.1 / (1 + (reductions[0]?.leverage ?? 1) * (reductions[0]?.feeRate ?? 0)));
 
     const openings = manager.handleSignal({
       venue: "okx",
@@ -434,8 +467,8 @@ describe("PositionManager", () => {
       price: 100
     });
     expect(orders).toHaveLength(1);
-    expect(orders[0]?.sizeDelta).toBeCloseTo(0.05);
-    expect(orders[0]?.targetSize).toBeCloseTo(0.05);
+    expect(orderBudgetCost(orders[0])).toBeLessThanOrEqual(0.05 + 1e-9);
+    expect(orders[0]?.sizeDelta).toBeLessThan(0.05);
   });
 
   it("reports stats by instrument and settlement currency", () => {
