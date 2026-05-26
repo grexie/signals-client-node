@@ -82,6 +82,7 @@ export declare class SignalsClient extends EventEmitter {
     private ws?;
     private readonly queue;
     private readonly waiters;
+    private terminalError?;
     constructor(token: SignalsWebSocketToken, options?: SignalsClientOptions);
     connect(): Promise<void>;
     close(): void;
@@ -89,9 +90,12 @@ export declare class SignalsClient extends EventEmitter {
     unsubscribe(subscriptionId: number): void;
     unsubscribeInstrument(venue: string, instrument: string): void;
     receive(signal?: AbortSignal): Promise<SignalsEvent>;
+    events(signal?: AbortSignal): AsyncIterableIterator<SignalsEvent>;
     [Symbol.asyncIterator](): AsyncIterableIterator<SignalsEvent>;
     private send;
     private accept;
+    private fail;
+    private closeStreams;
     private rejectWaiters;
     private removeWaiter;
 }

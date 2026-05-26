@@ -3,6 +3,7 @@ import { WebSocketServer } from "ws";
 import {
   PositionManager,
   SignalsClient,
+  type SignalsEvent,
   AssetManager,
   InstrumentManager,
   parseEvent,
@@ -90,6 +91,29 @@ describe("SignalsClient", () => {
     client.close();
     server.close();
   });
+
+  it("fans events out to independent consumers", async () => {
+    const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    const port = (server.address() as { port: number }).port;
+    server.on("connection", (socket) => {
+      socket.send(JSON.stringify({ type: "ready", message: "ok" }));
+    });
+
+    const client = new SignalsClient("ws_test", { url: `ws://127.0.0.1:${port}` });
+    const first = client.events();
+    const second = client.events();
+    const firstEvent = first.next();
+    const secondEvent = second.next();
+    await client.connect();
+
+    await expect(firstEvent).resolves.toMatchObject({ value: { type: "ready" } });
+    await expect(secondEvent).resolves.toMatchObject({ value: { type: "ready" } });
+    await first.return?.();
+    await second.return?.();
+    client.close();
+    server.close();
+  });
 });
 
 describe("PositionManager", () => {
@@ -102,6 +126,7 @@ describe("PositionManager", () => {
       minLeverage: 1,
       maxLeverage: 5
     }));
+    manager.instrumentManager().updateInstrument({ venue: "okx", instrument: "BTC-USDT-SWAP" });
     const buy = manager.handleSignal({
       venue: "okx",
       instrument: "BTC-USDT-SWAP",
@@ -141,6 +166,7 @@ describe("PositionManager", () => {
       minExpectedEdge: 0,
       minOrderDelta: 0.2
     }));
+    manager.instrumentManager().updateInstrument({ venue: "okx", instrument: "DOGE-USDT-SWAP" });
     expect(manager.handleSignal({
       venue: "okx",
       instrument: "DOGE-USDT-SWAP",
@@ -159,6 +185,95 @@ describe("PositionManager", () => {
       stopLoss: 0.004,
       price: 0.2
     })).toHaveLength(1);
+  });
+
+  it("ignores signals for unconfigured instruments", () => {
+    const manager = new PositionManager(undefined, productionPositionManagerConfig({
+      positionSize: 0.1,
+      minExpectedEdge: 0,
+      minOrderDelta: 0
+    }));
+    expect(manager.handleSignal({
+      venue: "okx",
+      instrument: "SOL-USDT-SWAP",
+      side: "buy",
+      confidence: 1,
+      takeProfit: 0.02,
+      stopLoss: 0.004,
+      price: 100
+    })).toHaveLength(0);
+    expect(manager.positions()).toHaveLength(0);
+
+    manager.instrumentManager().updateInstrument({ venue: "okx", instrument: "SOL-USDT-SWAP" });
+    expect(manager.handleSignal({
+      venue: "okx",
+      instrument: "SOL-USDT-SWAP",
+      side: "buy",
+      confidence: 1,
+      takeProfit: 0.02,
+      stopLoss: 0.004,
+      price: 100
+    })).toHaveLength(1);
+  });
+
+  it("ignores replay signal events", () => {
+    const manager = new PositionManager(undefined, productionPositionManagerConfig({
+      positionSize: 0.1,
+      minExpectedEdge: 0,
+      minOrderDelta: 0
+    }));
+    manager.instrumentManager().updateInstrument({ venue: "okx", instrument: "BTC-USDT-SWAP" });
+    const event: SignalsEvent = {
+      type: "signal",
+      subscriptionId: 3,
+      venue: "okx",
+      instrument: "BTC-USDT-SWAP",
+      replay: true,
+      signal: {
+        venue: "okx",
+        instrument: "BTC-USDT-SWAP",
+        side: "buy",
+        confidence: 1,
+        takeProfit: 0.02,
+        stopLoss: 0.004,
+        price: 100
+      }
+    };
+    expect(manager.handleEvent(event)).toHaveLength(0);
+    expect(manager.positions()).toHaveLength(0);
+    expect(manager.handleEvent({ ...event, replay: false })).toHaveLength(1);
+  });
+
+  it("adapts leverage by confidence, edge, and score within configured caps", () => {
+    const leverageFor = (instrument: string, confidence: number, takeProfit: number, score: number): number => {
+      const manager = new PositionManager(undefined, productionPositionManagerConfig({
+        positionSize: 1,
+        minExpectedEdge: 0,
+        minOrderDelta: 0,
+        minLeverage: 1,
+        maxLeverage: 5
+      }));
+      manager.instrumentManager().updateInstrument({ venue: "okx", instrument });
+      const [order] = manager.handleSignal({
+        venue: "okx",
+        instrument,
+        side: "buy",
+        confidence,
+        takeProfit,
+        stopLoss: 0,
+        score,
+        price: 100
+      });
+      return order.leverage;
+    };
+
+    const low = leverageFor("LOW-USDT-SWAP", 0.2, 0, 0);
+    const scored = leverageFor("SCORE-USDT-SWAP", 0.2, 0, 1);
+    const high = leverageFor("HIGH-USDT-SWAP", 1, 0.02, 1);
+    expect(low).toBeGreaterThanOrEqual(1);
+    expect(high).toBeLessThanOrEqual(5);
+    expect(scored).toBeGreaterThan(low);
+    expect(high).toBeCloseTo(5);
   });
 
   it("turns abstract sizing into rounded concrete orders", () => {

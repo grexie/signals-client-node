@@ -64,6 +64,11 @@ const manager = new PositionManager(client, productionPositionManagerConfig({
     "okx:BTC-USDT-SWAP": { takerFeeRate: 0.00045, maxLeverage: 5 }
   }
 }));
+manager.instrumentManager().updateInstrument({
+  venue: "okx",
+  instrument: "BTC-USDT-SWAP",
+  settlementCurrency: "USDT"
+});
 
 for await (const order of manager.run()) {
   console.log(order.instrument, order.side, order.sizeDelta, order.targetSize, order.leverage);
@@ -79,6 +84,8 @@ The sizing model follows the production Grexie Signals server:
 - same-side churn can be suppressed with `rebalanceIntervalMs`, while opposite-side signals can still flip positions;
 - maker/taker fees and per-instrument overrides feed estimated fees and realized PnL;
 - leverage is selected inside the configured min/max range using confidence, fee-adjusted expected edge, and signal score.
+
+`PositionManager` ignores replay signal events and ignores live signals whose venue/instrument pair has not been configured in its `InstrumentManager`. `run` uses an independent event stream, so multiple position managers can share one `SignalsClient`.
 
 Use `addPosition`, `updatePosition`, and `closePosition` to hydrate or mutate the runtime from your exchange account. Use `updatePrice` with exchange mark prices to evaluate take-profit and stop-loss exits between websocket signals.
 

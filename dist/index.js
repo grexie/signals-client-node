@@ -7,6 +7,7 @@ export class SignalsClient extends EventEmitter {
     ws;
     queue = [];
     waiters = [];
+    terminalError;
     constructor(token, options = {}) {
         super();
         this.token = token;
@@ -24,10 +25,11 @@ export class SignalsClient extends EventEmitter {
             ...this.options.headers,
             ...(this.token ? { Authorization: `Bearer ${this.token}` } : {})
         };
+        this.terminalError = undefined;
         this.ws = new this.options.WebSocketCtor(this.options.url, { headers });
         this.ws.on("message", (data) => this.accept(parseEvent(data.toString())));
-        this.ws.on("error", (error) => this.rejectWaiters(error instanceof Error ? error : new Error(String(error))));
-        this.ws.on("close", () => this.rejectWaiters(new Error("signals-client: websocket closed")));
+        this.ws.on("error", (error) => this.fail(error instanceof Error ? error : new Error(String(error))));
+        this.ws.on("close", () => this.closeStreams(new Error("signals-client: websocket closed")));
         return new Promise((resolve, reject) => {
             this.ws?.once("open", () => resolve());
             this.ws?.once("error", reject);
@@ -51,6 +53,9 @@ export class SignalsClient extends EventEmitter {
         if (queued) {
             return Promise.resolve(queued);
         }
+        if (this.terminalError) {
+            return Promise.reject(this.terminalError);
+        }
         if (signal?.aborted) {
             return Promise.reject(new Error("signals-client: receive aborted"));
         }
@@ -67,10 +72,68 @@ export class SignalsClient extends EventEmitter {
             this.waiters.push(waiter);
         });
     }
-    async *[Symbol.asyncIterator]() {
-        for (;;) {
-            yield await this.receive();
+    async *events(signal) {
+        const queue = [];
+        let wake;
+        let terminalError = this.terminalError;
+        let closed = !!this.terminalError;
+        const notify = () => {
+            wake?.();
+            wake = undefined;
+        };
+        const onEvent = (event) => {
+            queue.push(event);
+            notify();
+        };
+        const onError = (error) => {
+            terminalError = error;
+            notify();
+        };
+        const onClose = () => {
+            closed = true;
+            notify();
+        };
+        this.on("event", onEvent);
+        this.on("client-error", onError);
+        this.on("client-close", onClose);
+        try {
+            for (;;) {
+                if (signal?.aborted) {
+                    throw new Error("signals-client: events aborted");
+                }
+                if (queue.length === 0 && terminalError) {
+                    throw terminalError;
+                }
+                if (queue.length === 0 && closed) {
+                    return;
+                }
+                if (queue.length === 0) {
+                    await new Promise((resolve, reject) => {
+                        wake = resolve;
+                        if (!signal)
+                            return;
+                        const onAbort = () => reject(new Error("signals-client: events aborted"));
+                        signal.addEventListener("abort", onAbort, { once: true });
+                        const previousWake = wake;
+                        wake = () => {
+                            signal.removeEventListener("abort", onAbort);
+                            previousWake?.();
+                        };
+                    });
+                }
+                while (queue.length > 0) {
+                    yield queue.shift();
+                }
+            }
         }
+        finally {
+            this.off("event", onEvent);
+            this.off("client-error", onError);
+            this.off("client-close", onClose);
+        }
+    }
+    async *[Symbol.asyncIterator]() {
+        yield* this.events();
     }
     send(payload) {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
@@ -88,6 +151,16 @@ export class SignalsClient extends EventEmitter {
             return;
         }
         this.queue.push(event);
+    }
+    fail(error) {
+        this.terminalError = error;
+        this.emit("client-error", error);
+        this.rejectWaiters(error);
+    }
+    closeStreams(error) {
+        this.terminalError = error;
+        this.emit("client-close");
+        this.rejectWaiters(error);
     }
     rejectWaiters(error) {
         while (this.waiters.length > 0) {
@@ -239,8 +312,7 @@ export class PositionManager {
         if (!this.client) {
             throw new Error("signals-client: PositionManager has no SignalsClient");
         }
-        for (;;) {
-            const event = await this.client.receive(signal);
+        for await (const event of this.client.events(signal)) {
             for (const order of this.handleEvent(event)) {
                 yield order;
             }
@@ -385,6 +457,8 @@ export class PositionManager {
     handleEvent(event) {
         if (event.type !== "signal")
             return [];
+        if (event.replay)
+            return [];
         const signal = { ...event.signal };
         signal.venue ||= event.venue;
         signal.instrument ||= event.instrument;
@@ -399,6 +473,8 @@ export class PositionManager {
         if (!signal.venue || !signal.instrument) {
             throw new Error("signals-client: signal venue and instrument are required");
         }
+        if (!this.instrumentMetadata.instrument(signal.venue, signal.instrument))
+            return [];
         const now = signalDate(signal.timestamp);
         const key = positionKey(signal.venue, signal.instrument);
         const targetSign = sideSign(signal.side);
