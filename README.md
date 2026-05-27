@@ -52,7 +52,8 @@ import {
 } from "@grexie/signals-client";
 
 const manager = new PositionManager(client, productionPositionManagerConfig({
-  positionSize: 0.10,
+  maxMarginRatio: 0.10,
+  minPositionSizeRatio: 0.01,
   minExpectedEdge: 0.0045,
   minOrderDelta: 0.20,
   rebalanceIntervalMs: 6 * 60 * 60 * 1000,
@@ -71,25 +72,28 @@ manager.instrumentManager().updateInstrument({
 });
 
 for await (const order of manager.run()) {
-  console.log(order.instrument, order.side, order.sizeDelta, order.targetSize, order.leverage);
+  console.log(order.instrument, order.side, order.quantity, order.margin, order.leverage);
 }
 ```
 
 The sizing model follows the production Grexie Signals server:
 
-- `positionSize` is the total portfolio budget across all active positions;
-- confidence is stored separately from position size;
+- `maxMarginRatio` is the fraction of `AssetManager` capital that may be allocated as margin across all active positions;
+- `minPositionSizeRatio` defaults to `0.01`, suppressing new positions whose margin would be less than 1% of total portfolio capital;
+- `Position.size`, `Order.sizeDelta`, and `Order.targetSize` are signed executable quantities/lots;
+- `Order.margin` is the settlement-currency margin needed by those lots, with fees budgeted separately;
+- confidence is stored separately from lot size;
 - positions are rebalanced by confidence weight;
 - reductions, closes, and first-phase flips are emitted before openings or increases;
 - openings and increases are capped by live `AssetManager` available exposure when asset snapshots are attached;
-- `minOrderDelta` is scaled by `positionSize`, so a `0.20` order threshold with a `0.10` portfolio budget becomes `0.02`;
+- `minOrderDelta` is scaled by the max margin budget, so a `0.20` threshold with a 100 USDT budget suppresses margin changes below 20 USDT;
 - same-side churn can be suppressed with `rebalanceIntervalMs`, while opposite-side signals can still flip positions;
 - maker/taker fees and per-instrument overrides feed estimated fees and realized PnL;
 - leverage is selected inside the configured min/max range using confidence, fee-adjusted expected edge, and signal score.
 
 `PositionManager` ignores replay signal events and ignores live signals whose venue/instrument pair has not been configured in its `InstrumentManager`. `run` uses an independent event stream, so multiple position managers can share one `SignalsClient`.
 
-Use `addPosition`, `updatePosition`, and `closePosition` to hydrate or mutate the runtime from your exchange account. Use `updatePrice` with exchange mark prices to evaluate take-profit and stop-loss exits between websocket signals.
+Use `addPosition`, `updatePosition`, `replacePositions`, and `closePosition` to hydrate or reconcile the runtime from your exchange account. Use `updatePrice` with exchange mark prices to evaluate take-profit and stop-loss exits between websocket signals.
 
 ## Assets, Instruments, And Stats
 
@@ -99,7 +103,7 @@ Call `manager.stats()` for realized and unrealized PnL in account value and perc
 
 ## Price Data
 
-Current Grexie Signals websocket messages expose strategy direction, confidence, risk levels, and component diagnostics. If your subscribed payload does not include signal prices, provide exchange marks through `updatePosition` or `updatePrice` before relying on realized PnL. Order sizing recommendations are still returned as portfolio percentages.
+Current Grexie Signals websocket messages expose strategy direction, confidence, risk levels, and component diagnostics. If your subscribed payload does not include signal prices, provide exchange marks through `updatePosition` or `updatePrice` before relying on realized PnL. Order sizing recommendations are returned as executable quantities/lots plus margin and fee estimates.
 
 ## Development
 

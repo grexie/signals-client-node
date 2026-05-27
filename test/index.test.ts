@@ -50,7 +50,7 @@ describe("parseEvent", () => {
 
 function orderBudgetCost(order: Order | undefined): number {
   if (!order) return 0;
-  return Math.abs(order.sizeDelta) + Math.max(0, order.estimatedFee);
+  return Math.max(0, order.margin) + Math.max(0, order.estimatedFee);
 }
 
 describe("SignalsClient", () => {
@@ -125,7 +125,7 @@ describe("SignalsClient", () => {
 describe("PositionManager", () => {
   it("opens and flips instead of getting stuck long", () => {
     const manager = new PositionManager(undefined, productionPositionManagerConfig({
-      positionSize: 0.1,
+      maxMarginRatio: 0.1,
       minExpectedEdge: 0,
       minOrderDelta: 0.2,
       rebalanceIntervalMs: 60 * 60 * 1000,
@@ -184,7 +184,7 @@ describe("PositionManager", () => {
 
   it("uses confidence as allocation weight", () => {
     const manager = new PositionManager(undefined, productionPositionManagerConfig({
-      positionSize: 0.1,
+      maxMarginRatio: 0.1,
       minExpectedEdge: 0,
       minOrderDelta: 0.2
     }));
@@ -215,7 +215,7 @@ describe("PositionManager", () => {
       tickSize: 0.1
     });
     const manager = new PositionManager(undefined, productionPositionManagerConfig({
-      positionSize: 0.5,
+      maxMarginRatio: 0.5,
       minExpectedEdge: 0,
       minOrderDelta: 0,
       assetManager: assets,
@@ -232,13 +232,13 @@ describe("PositionManager", () => {
     });
     expect(orders).toHaveLength(1);
     expect(orders[0]?.quantity).toBe(1);
-    expect(orders[0]?.sizeDelta).toBeCloseTo(0.333);
-    expect(orders[0]?.targetSize).toBeCloseTo(0.333);
+    expect(orders[0]?.sizeDelta).toBeCloseTo(1);
+    expect(orders[0]?.targetSize).toBeCloseTo(1);
   });
 
   it("ignores signals for unconfigured instruments", () => {
     const manager = new PositionManager(undefined, productionPositionManagerConfig({
-      positionSize: 0.1,
+      maxMarginRatio: 0.1,
       minExpectedEdge: 0,
       minOrderDelta: 0
     }));
@@ -267,7 +267,7 @@ describe("PositionManager", () => {
 
   it("ignores replay signal events", () => {
     const manager = new PositionManager(undefined, productionPositionManagerConfig({
-      positionSize: 0.1,
+      maxMarginRatio: 0.1,
       minExpectedEdge: 0,
       minOrderDelta: 0
     }));
@@ -296,7 +296,7 @@ describe("PositionManager", () => {
   it("adapts leverage by confidence, edge, and score within configured caps", () => {
     const leverageFor = (instrument: string, confidence: number, takeProfit: number, score: number): number => {
       const manager = new PositionManager(undefined, productionPositionManagerConfig({
-        positionSize: 1,
+        maxMarginRatio: 1,
         minExpectedEdge: 0,
         minOrderDelta: 0,
         minLeverage: 1,
@@ -339,7 +339,7 @@ describe("PositionManager", () => {
       maxLeverage: 2
     });
     const manager = new PositionManager(undefined, productionPositionManagerConfig({
-      positionSize: 0.1,
+      maxMarginRatio: 0.1,
       minExpectedEdge: 0,
       minOrderDelta: 0,
       minLeverage: 1,
@@ -377,7 +377,7 @@ describe("PositionManager", () => {
       tickSize: 0.1
     });
     const manager = new PositionManager(undefined, productionPositionManagerConfig({
-      positionSize: 0.01,
+      maxMarginRatio: 0.01,
       minExpectedEdge: 0,
       minOrderDelta: 0,
       assetManager: assets,
@@ -401,7 +401,7 @@ describe("PositionManager", () => {
     instruments.updateInstrument({ venue: "okx", instrument: "BTC-USDT-SWAP", settlementCurrency: "USDT" });
     instruments.updateInstrument({ venue: "okx", instrument: "ETH-USDT-SWAP", settlementCurrency: "USDT" });
     const manager = new PositionManager(undefined, productionPositionManagerConfig({
-      positionSize: 0.2,
+      maxMarginRatio: 0.2,
       minExpectedEdge: 0,
       minOrderDelta: 0,
       assetManager: assets,
@@ -410,7 +410,7 @@ describe("PositionManager", () => {
     manager.addPosition({
       venue: "okx",
       instrument: "BTC-USDT-SWAP",
-      size: 0.15,
+      size: 2,
       confidence: 1,
       entryPrice: 100,
       lastPrice: 100
@@ -428,7 +428,7 @@ describe("PositionManager", () => {
     expect(reductions).toHaveLength(1);
     expect(reductions[0]?.instrument).toBe("BTC-USDT-SWAP");
     expect(reductions[0]?.side).toBe("sell");
-    expect(reductions[0]?.targetSize).toBeCloseTo(0.1 / (1 + (reductions[0]?.leverage ?? 1) * (reductions[0]?.feeRate ?? 0)));
+    expect(reductions[0]?.targetSize).toBeCloseTo((100 / (1 + (reductions[0]?.leverage ?? 1) * (reductions[0]?.feeRate ?? 0))) / (reductions[0]?.price ?? 100));
 
     const openings = manager.handleSignal({
       venue: "okx",
@@ -451,7 +451,7 @@ describe("PositionManager", () => {
     const instruments = new InstrumentManager();
     instruments.updateInstrument({ venue: "okx", instrument: "BTC-USDT-SWAP", settlementCurrency: "USDT" });
     const manager = new PositionManager(undefined, productionPositionManagerConfig({
-      positionSize: 0.2,
+      maxMarginRatio: 0.2,
       minExpectedEdge: 0,
       minOrderDelta: 0,
       assetManager: assets,
@@ -467,8 +467,8 @@ describe("PositionManager", () => {
       price: 100
     });
     expect(orders).toHaveLength(1);
-    expect(orderBudgetCost(orders[0])).toBeLessThanOrEqual(0.05 + 1e-9);
-    expect(orders[0]?.sizeDelta).toBeLessThan(0.05);
+    expect(orderBudgetCost(orders[0])).toBeLessThanOrEqual(50 + 1e-9);
+    expect(orders[0]?.margin).toBeLessThan(50);
   });
 
   it("caps openings to remaining portfolio budget without asset snapshots", () => {
@@ -476,7 +476,7 @@ describe("PositionManager", () => {
     instruments.updateInstrument({ venue: "okx", instrument: "BTC-USDT-SWAP", settlementCurrency: "USDT" });
     instruments.updateInstrument({ venue: "okx", instrument: "ETH-USDT-SWAP", settlementCurrency: "USDT" });
     const manager = new PositionManager(undefined, productionPositionManagerConfig({
-      positionSize: 1,
+      maxMarginRatio: 1,
       minExpectedEdge: 0,
       minOrderDelta: 0,
       rebalanceIntervalMs: 6 * 60 * 60 * 1000,

@@ -150,6 +150,8 @@ export interface InstrumentMetadata {
     lotSize?: number;
     minSize?: number;
     tickSize?: number;
+    contractValue?: number;
+    contractMultiplier?: number;
     maxLeverage?: number;
 }
 export declare class InstrumentManager {
@@ -159,14 +161,19 @@ export declare class InstrumentManager {
     instruments(): Required<InstrumentMetadata>[];
 }
 export interface PositionManagerConfig {
+    maxMarginRatio?: number;
+    /** @deprecated use maxMarginRatio. */
     positionSize?: number;
     minExpectedEdge?: number;
     minOrderDelta?: number;
+    minPositionSizeRatio?: number;
     rebalanceIntervalMs?: number;
     makerFeeRate?: number;
     takerFeeRate?: number;
     minLeverage?: number;
     maxLeverage?: number;
+    availableMarginBuffer?: number;
+    executableMarginBuffer?: number;
     instruments?: Record<string, InstrumentConfig>;
     assetManager?: AssetManager;
     instrumentManager?: InstrumentManager;
@@ -202,6 +209,7 @@ export interface Order {
     feeRate: number;
     estimatedFee: number;
     estimatedFeeValue: number;
+    margin: number;
     quantity: number;
     notional: number;
     settlementCurrency: string;
@@ -284,6 +292,7 @@ export declare class PositionManager {
     run(signal?: AbortSignal): AsyncIterableIterator<Order>;
     addPosition(position: Position): void;
     updatePosition(position: Position): void;
+    replacePositions(positions: Position[]): void;
     closePosition(venue: string, instrument: string): Order[];
     positions(): Position[];
     closedTrades(): ClosedTrade[];
@@ -296,13 +305,24 @@ export declare class PositionManager {
     private materializeRebalanceOrders;
     private availableExposureBudget;
     private availablePortfolioBudget;
+    private maxPortfolioMarginBudget;
+    private portfolioCapital;
+    private positionMargin;
+    private marginForQuantity;
+    private positionUnrealizedPnl;
+    private realizedGrossForQuantity;
+    private feeForQuantity;
     private executableAllocationForBudget;
     private executableLotStepCost;
     private capOpeningDeltaToBudget;
+    private capExecutableDeltaWithBufferedCost;
+    private capContinuousOpeningDeltaToBudget;
     private shouldSkipRebalanceDelta;
     private orderForDelta;
     private applyDelta;
     private effectiveMinOrderDelta;
+    private minimumPositionSize;
+    private meetsMinimumPositionSize;
     private selectLeverage;
     private makerFeeRate;
     private takerFeeRate;

@@ -264,6 +264,8 @@ export class InstrumentManager {
             lotSize: metadata.lotSize ?? 0,
             minSize: metadata.minSize ?? 0,
             tickSize: metadata.tickSize ?? 0,
+            contractValue: metadata.contractValue ?? 0,
+            contractMultiplier: metadata.contractMultiplier ?? 0,
             maxLeverage: metadata.maxLeverage ?? 0
         });
     }
@@ -277,17 +279,25 @@ export class InstrumentManager {
 const productionDefaults = {
     makerFeeRate: 0.0002,
     takerFeeRate: 0.0005,
-    positionSize: 1,
+    maxMarginRatio: 1,
+    positionSize: 0,
     minExpectedEdge: 0.0045,
     minOrderDelta: 0.2,
+    minPositionSizeRatio: 0.01,
     rebalanceIntervalMs: 6 * 60 * 60 * 1000,
     minLeverage: 1,
     maxLeverage: 1,
+    availableMarginBuffer: 0.1,
+    executableMarginBuffer: 0.001,
     assetManager: undefined,
     instrumentManager: undefined
 };
 export function productionPositionManagerConfig(overrides = {}) {
-    return { ...productionDefaults, ...overrides, instruments: overrides.instruments ?? {} };
+    const config = { ...productionDefaults, ...overrides, instruments: overrides.instruments ?? {} };
+    if (overrides.maxMarginRatio === undefined && overrides.positionSize !== undefined && overrides.positionSize > 0 && overrides.positionSize <= 1) {
+        config.maxMarginRatio = overrides.positionSize;
+    }
+    return config;
 }
 export class PositionManager {
     client;
@@ -299,8 +309,8 @@ export class PositionManager {
     constructor(client, config = productionPositionManagerConfig()) {
         this.client = client;
         this.config = normalizeConfig(config);
-        this.assets = config.assetManager ?? new AssetManager();
-        this.instrumentMetadata = config.instrumentManager ?? new InstrumentManager();
+        this.assets = this.config.assetManager;
+        this.instrumentMetadata = this.config.instrumentManager;
     }
     assetManager() {
         return this.assets;
@@ -324,6 +334,14 @@ export class PositionManager {
     }
     updatePosition(position) {
         this.addPosition(position);
+    }
+    replacePositions(positions) {
+        this.positionsByKey.clear();
+        for (const position of positions) {
+            if (!position.venue || !position.instrument || Math.abs(position.size) <= 1e-9)
+                continue;
+            this.addPosition(position);
+        }
     }
     closePosition(venue, instrument) {
         const key = positionKey(venue, instrument);
@@ -378,14 +396,14 @@ export class PositionManager {
         for (const [key, position] of this.positionsByKey) {
             const metadata = this.instrumentFor(position.venue, position.instrument);
             const asset = this.assets.asset(metadata.settlementCurrency);
-            const equity = positiveOr(asset?.equity, (asset?.cash ?? 0) + (asset?.used ?? 0), 1);
+            const equity = positiveOr(asset?.equity, (asset?.cash ?? 0) + (asset?.used ?? 0), asset?.cash, 1);
             const price = roundToTick(position.lastPrice ?? position.entryPrice ?? 0, metadata.tickSize);
-            const notionalRaw = Math.abs(position.size) * equity * positiveOr(position.leverage, this.minLeverage(key), 1);
-            const quantity = price > 0 ? roundDownToStep(notionalRaw / price, metadata.lotSize) : 0;
-            const notional = quantity * price;
-            const realized = (position.realizedPnl ?? 0) * equity;
-            const unrealized = move(position) * Math.abs(position.size) * equity;
-            const fees = (position.fees ?? 0) * equity;
+            const contractNotional = instrumentContractNotional(price, metadata);
+            const quantity = contractNotional > 0 ? roundDownToStep(Math.abs(position.size), metadata.lotSize) : Math.abs(position.size);
+            const notional = quantity * contractNotional;
+            const realized = position.realizedPnl ?? 0;
+            const unrealized = this.positionUnrealizedPnl(key, position);
+            const fees = position.fees ?? 0;
             stats.byInstrument[key] = {
                 venue: position.venue,
                 instrument: position.instrument,
@@ -397,9 +415,9 @@ export class PositionManager {
                 realizedPnl: realized,
                 unrealizedPnl: unrealized,
                 fees,
-                realizedPnlPercent: position.realizedPnl ?? 0,
-                unrealizedPnlPercent: move(position) * Math.abs(position.size),
-                totalPnlPercent: (position.realizedPnl ?? 0) + move(position) * Math.abs(position.size),
+                realizedPnlPercent: ratioOrZero(position.realizedPnl ?? 0, equity),
+                unrealizedPnlPercent: ratioOrZero(unrealized, equity),
+                totalPnlPercent: ratioOrZero((position.realizedPnl ?? 0) + unrealized, equity),
                 leverage: position.leverage ?? this.minLeverage(key)
             };
             stats.realizedPnl += realized;
@@ -449,10 +467,7 @@ export class PositionManager {
         const delta = -position.size;
         const order = this.orderForDelta(key, position, delta, 0, undefined, reason, timestamp, position.confidence);
         order.feeRate = feeRate;
-        const metadata = this.instrumentFor(position.venue, position.instrument);
-        const asset = this.assets.asset(metadata.settlementCurrency);
-        const equity = positiveOr(asset?.equity, (asset?.cash ?? 0) + (asset?.used ?? 0), 1);
-        order.estimatedFee = feeExposureForNotional(order.notional, feeRate, equity);
+        order.estimatedFee = feeValueForNotional(order.notional, feeRate);
         order.estimatedFeeValue = order.notional * feeRate;
         if (!this.orderMeetsInstrumentMinimum(order))
             return [];
@@ -490,10 +505,10 @@ export class PositionManager {
         if (this.config.minExpectedEdge > 0 && edge < this.config.minExpectedEdge)
             return [];
         let position = this.positionsByKey.get(key);
-        const targetSize = targetSign * this.config.positionSize;
+        const portfolioBudget = this.maxPortfolioMarginBudget();
         const minOrderDelta = this.effectiveMinOrderDelta();
         if (!position || Math.abs(position.size) <= 1e-9) {
-            if (Math.abs(targetSize) < minOrderDelta)
+            if (portfolioBudget < minOrderDelta || !this.meetsMinimumPositionSize(portfolioBudget))
                 return [];
             position = {
                 venue: signal.venue,
@@ -513,8 +528,6 @@ export class PositionManager {
                 if (now.getTime() < position.lastSignalAt.getTime() + this.config.rebalanceIntervalMs)
                     return [];
             }
-            if (!isFlip && minOrderDelta > 0 && Math.abs(targetSize - position.size) < minOrderDelta)
-                return [];
         }
         position.confidence = targetConfidence;
         position.lastSignalAt = now;
@@ -542,6 +555,9 @@ export class PositionManager {
         });
     }
     rebalance(now, sideOverrides, contexts) {
+        const portfolioBudget = this.maxPortfolioMarginBudget();
+        if (portfolioBudget <= 0 || this.positionsByKey.size === 0)
+            return [];
         const weights = new Map();
         const sides = new Map();
         for (const [key, position] of this.positionsByKey) {
@@ -550,7 +566,7 @@ export class PositionManager {
             const hasOverride = Object.hasOwn(sideOverrides, key);
             let weight = clamp01(position.confidence);
             if (!hasOverride && weight <= 0)
-                weight = confidenceFromSize(position, this.config.positionSize);
+                weight = clamp01(this.positionMargin(key, position) / portfolioBudget);
             let side = sign(position.size);
             if (hasOverride)
                 side = sideOverrides[key] ?? side;
@@ -573,8 +589,12 @@ export class PositionManager {
                 position.confidence = weight;
                 continue;
             }
+            if (targetSize !== 0 && !this.meetsMinimumPositionSize(this.marginForQuantity(key, position, targetSize)) && !isExposureReduction(position.size, targetSize)) {
+                position.confidence = weight;
+                continue;
+            }
             const hasOverride = Object.hasOwn(sideOverrides, key);
-            if (this.shouldSkipRebalanceDelta(position, targetSize, delta, now, hasOverride)) {
+            if (this.shouldSkipRebalanceDelta(key, position, targetSize, delta, now, hasOverride)) {
                 position.confidence = weight;
                 continue;
             }
@@ -600,7 +620,8 @@ export class PositionManager {
     }
     allocateTargetSizes(keys, weights, sides, contexts) {
         const targets = new Map();
-        if (this.config.positionSize <= 0)
+        const portfolioBudget = this.maxPortfolioMarginBudget();
+        if (portfolioBudget <= 0)
             return targets;
         const active = new Set(keys.filter((key) => (weights.get(key) ?? 0) > 1e-9 && (sides.get(key) ?? 0) !== 0));
         while (active.size > 0) {
@@ -615,7 +636,7 @@ export class PositionManager {
                 const position = this.positionsByKey.get(key);
                 if (!position)
                     continue;
-                const desiredBudget = this.config.positionSize * (weights.get(key) ?? 0) / totalWeight;
+                const desiredBudget = portfolioBudget * (weights.get(key) ?? 0) / totalWeight;
                 if (this.executableAllocationForBudget(key, position, desiredBudget, contexts[key]).margin > 1e-9)
                     continue;
                 const weight = weights.get(key) ?? 0;
@@ -640,14 +661,16 @@ export class PositionManager {
             const position = this.positionsByKey.get(key);
             if (!position)
                 continue;
-            const desiredBudget = this.config.positionSize * (weights.get(key) ?? 0) / totalWeight;
+            const desiredBudget = portfolioBudget * (weights.get(key) ?? 0) / totalWeight;
             const executable = this.executableAllocationForBudget(key, position, desiredBudget, contexts[key]);
             if (executable.margin <= 1e-9)
                 continue;
-            targets.set(key, (sides.get(key) ?? 0) * executable.margin);
+            if (!this.meetsMinimumPositionSize(executable.margin))
+                continue;
+            targets.set(key, (sides.get(key) ?? 0) * executable.quantity);
             allocated += executable.margin + executable.fee;
         }
-        let free = this.config.positionSize - allocated;
+        let free = portfolioBudget - allocated;
         if (free <= 1e-9)
             return targets;
         const priority = [...keys].sort((a, b) => {
@@ -663,13 +686,20 @@ export class PositionManager {
             const step = this.executableLotStepCost(key, position, contexts[key]);
             const stepCost = step.margin + step.fee;
             if (stepCost <= 1e-9) {
-                targets.set(key, (targets.get(key) ?? 0) + (sides.get(key) ?? 0) * free);
+                const executable = this.executableAllocationForBudget(key, position, free, contexts[key]);
+                if (executable.quantity > 1e-9 && this.meetsMinimumPositionSize(executable.margin)) {
+                    targets.set(key, (targets.get(key) ?? 0) + (sides.get(key) ?? 0) * executable.quantity);
+                }
                 break;
             }
             const steps = Math.floor((free + 1e-9) / stepCost);
             if (steps <= 0)
                 continue;
-            targets.set(key, (targets.get(key) ?? 0) + (sides.get(key) ?? 0) * steps * step.margin);
+            const next = (targets.get(key) ?? 0) + (sides.get(key) ?? 0) * steps * step.quantity;
+            const nextMargin = Math.abs(next) * step.margin / step.quantity;
+            if (!this.meetsMinimumPositionSize(nextMargin))
+                continue;
+            targets.set(key, next);
             free -= steps * stepCost;
         }
         return targets;
@@ -715,81 +745,165 @@ export class PositionManager {
         const asset = this.assets.asset(currency);
         if (!asset)
             return portfolioBudget;
-        const equity = positiveOr(asset.equity, asset.cash + asset.used, asset.cash);
-        if (equity <= 0)
-            return asset.available > 0 ? portfolioBudget : 0;
         if (asset.available <= 0)
             return 0;
-        return Math.min(Math.max(0, asset.available / equity), portfolioBudget);
+        let budget = Math.max(0, asset.available);
+        if (this.config.availableMarginBuffer > 0)
+            budget *= 1 - this.config.availableMarginBuffer;
+        return Math.min(budget, portfolioBudget);
     }
     availablePortfolioBudget() {
-        if (this.config.positionSize <= 0)
-            return 0;
+        const maxBudget = this.maxPortfolioMarginBudget();
         let used = 0;
-        for (const position of this.positionsByKey.values()) {
-            used += Math.abs(position.size);
+        for (const [key, position] of this.positionsByKey) {
+            used += this.positionMargin(key, position);
         }
-        return Math.max(0, this.config.positionSize - used);
+        return Math.max(0, maxBudget - used);
+    }
+    maxPortfolioMarginBudget() {
+        const capital = this.portfolioCapital();
+        if (capital <= 0 || this.config.maxMarginRatio <= 0)
+            return 0;
+        return capital * this.config.maxMarginRatio;
+    }
+    portfolioCapital() {
+        const capital = this.assets.assets().reduce((sum, asset) => sum + positiveOr(asset.equity, asset.cash + asset.used, asset.cash), 0);
+        return capital > 0 ? capital : 1;
+    }
+    positionMargin(key, position) {
+        if (Math.abs(position.size) <= 1e-9)
+            return 0;
+        return this.marginForQuantity(key, position, position.size);
+    }
+    marginForQuantity(key, position, quantity) {
+        if (Math.abs(quantity) <= 1e-9)
+            return 0;
+        const metadata = this.instrumentFor(position.venue, position.instrument);
+        const price = roundToTick(position.lastPrice ?? position.entryPrice ?? 0, metadata.tickSize);
+        const contractNotional = instrumentContractNotional(price, metadata);
+        const leverage = positiveOr(position.leverage, this.minLeverage(key), 1);
+        if (contractNotional <= 0 || leverage <= 0)
+            return 0;
+        return Math.abs(quantity) * contractNotional / leverage;
+    }
+    positionUnrealizedPnl(key, position) {
+        if (Math.abs(position.size) <= 1e-9 || !position.entryPrice || !position.lastPrice)
+            return 0;
+        return this.realizedGrossForQuantity(key, position, Math.abs(position.size), position.lastPrice);
+    }
+    realizedGrossForQuantity(key, position, quantity, exitPrice) {
+        if (quantity <= 1e-9 || !position.entryPrice || !exitPrice || exitPrice <= 0)
+            return 0;
+        const metadata = this.instrumentFor(position.venue, position.instrument);
+        const contractValue = positiveOr(metadata.contractValue, 1);
+        const contractMultiplier = positiveOr(metadata.contractMultiplier, 1);
+        const priceMove = position.size < 0 ? position.entryPrice - exitPrice : exitPrice - position.entryPrice;
+        return priceMove * quantity * contractValue * contractMultiplier;
+    }
+    feeForQuantity(key, position, quantity, price, feeRate) {
+        if (quantity <= 1e-9 || !price || price <= 0 || feeRate <= 0)
+            return 0;
+        const metadata = this.instrumentFor(position.venue, position.instrument);
+        return quantity * instrumentContractNotional(price, metadata) * feeRate;
     }
     executableAllocationForBudget(key, position, budget, context) {
         if (budget <= 1e-9)
-            return { margin: 0, fee: 0 };
+            return { quantity: 0, margin: 0, fee: 0 };
         const metadata = this.instrumentFor(position.venue, position.instrument);
-        const asset = this.assets.asset(metadata.settlementCurrency);
-        const equity = positiveOr(asset?.equity, (asset?.cash ?? 0) + (asset?.used ?? 0), 1);
         const price = roundToTick(position.lastPrice ?? position.entryPrice ?? 0, metadata.tickSize);
         const leverage = this.selectLeverage(key, context?.confidence ?? position.confidence, context?.expectedEdge ?? 0, context?.score);
-        if (price <= 0 || equity <= 0 || leverage <= 0)
-            return { margin: 0, fee: 0 };
+        const contractNotional = instrumentContractNotional(price, metadata);
+        if (contractNotional <= 0 || leverage <= 0)
+            return { quantity: 0, margin: 0, fee: 0 };
         const feeRate = this.takerFeeRate(key);
-        const feeMultiplier = Math.max(1 + leverage * feeRate, 1);
-        const maxMargin = budget / feeMultiplier;
-        const quantity = roundDownToStep(maxMargin * equity * leverage / price, metadata.lotSize);
-        if (quantity <= 1e-9)
-            return { margin: 0, fee: 0 };
-        if (metadata.minSize > 0 && quantity < metadata.minSize)
-            return { margin: 0, fee: 0 };
-        const margin = quantity * price / (equity * leverage);
-        const fee = quantity * price * feeRate / equity;
-        if (margin + fee > budget + 1e-9)
-            return { margin: 0, fee: 0 };
-        return { margin, fee };
+        let maxMargin = budget;
+        if (metadata.lotSize <= 0)
+            maxMargin = budget / Math.max(1 + leverage * feeRate, 1);
+        let quantity = roundDownToStep(maxMargin * leverage / contractNotional, metadata.lotSize);
+        while (quantity > 1e-9) {
+            if (metadata.minSize > 0 && quantity < metadata.minSize)
+                return { quantity: 0, margin: 0, fee: 0 };
+            const margin = quantity * contractNotional / leverage;
+            const fee = quantity * contractNotional * feeRate;
+            if (margin + fee <= budget + 1e-9)
+                return { quantity, margin, fee };
+            if (metadata.lotSize <= 0)
+                return { quantity: 0, margin: 0, fee: 0 };
+            quantity = roundDownToStep(quantity - metadata.lotSize, metadata.lotSize);
+        }
+        return { quantity: 0, margin: 0, fee: 0 };
     }
     executableLotStepCost(key, position, context) {
         const metadata = this.instrumentFor(position.venue, position.instrument);
         if (metadata.lotSize <= 0)
-            return { margin: 0, fee: 0 };
-        const asset = this.assets.asset(metadata.settlementCurrency);
-        const equity = positiveOr(asset?.equity, (asset?.cash ?? 0) + (asset?.used ?? 0), 1);
+            return { quantity: 0, margin: 0, fee: 0 };
         const price = roundToTick(position.lastPrice ?? position.entryPrice ?? 0, metadata.tickSize);
         const leverage = this.selectLeverage(key, context?.confidence ?? position.confidence, context?.expectedEdge ?? 0, context?.score);
-        if (price <= 0 || equity <= 0 || leverage <= 0)
-            return { margin: 0, fee: 0 };
+        const contractNotional = instrumentContractNotional(price, metadata);
+        if (contractNotional <= 0 || leverage <= 0)
+            return { quantity: 0, margin: 0, fee: 0 };
         return {
-            margin: metadata.lotSize * price / (equity * leverage),
-            fee: metadata.lotSize * price * this.takerFeeRate(key) / equity
+            quantity: metadata.lotSize,
+            margin: metadata.lotSize * contractNotional / leverage,
+            fee: metadata.lotSize * contractNotional * this.takerFeeRate(key)
         };
     }
     capOpeningDeltaToBudget(key, position, delta, context, budget) {
         if (Math.abs(delta) <= 1e-9 || budget <= 1e-9)
             return 0;
+        const absDelta = Math.abs(delta);
         const executable = this.executableAllocationForBudget(key, position, budget, context);
         if (executable.margin <= 1e-9)
             return 0;
-        if (executable.margin < Math.abs(delta))
-            return sign(delta) * executable.margin;
+        if (!this.meetsMinimumPositionSize(executable.margin))
+            return 0;
+        if (executable.quantity < absDelta)
+            return this.capExecutableDeltaWithBufferedCost(key, position, sign(delta) * executable.quantity, context, budget);
         const order = this.orderForDelta(key, position, delta, context.expectedEdge, context.score, "budget-check", new Date(), context.confidence);
         if (orderBudgetCost(order) > budget + 1e-9)
-            return sign(delta) * executable.margin;
+            return this.capExecutableDeltaWithBufferedCost(key, position, sign(delta) * executable.quantity, context, budget);
         return delta;
     }
-    shouldSkipRebalanceDelta(position, targetSize, delta, now, hasOverride) {
+    capExecutableDeltaWithBufferedCost(key, position, delta, context, budget) {
+        if (Math.abs(delta) <= 1e-9 || budget <= 1e-9)
+            return 0;
+        const metadata = this.instrumentFor(position.venue, position.instrument);
+        const quantityStep = metadata.lotSize > 0 ? metadata.lotSize : 0;
+        let candidate = Math.abs(delta);
+        while (candidate > 1e-9) {
+            const order = this.orderForDelta(key, position, sign(delta) * candidate, context.expectedEdge, context.score, "budget-check", new Date(), context.confidence);
+            if (orderBudgetCost(order) <= budget + 1e-9)
+                return sign(delta) * candidate;
+            if (quantityStep <= 1e-9)
+                return this.capContinuousOpeningDeltaToBudget(key, position, delta, context, budget);
+            candidate -= quantityStep;
+        }
+        return 0;
+    }
+    capContinuousOpeningDeltaToBudget(key, position, delta, context, budget) {
+        if (Math.abs(delta) <= 1e-9 || budget <= 1e-9)
+            return 0;
+        let low = 0;
+        let high = Math.abs(delta);
+        for (let i = 0; i < 64; i++) {
+            const mid = (low + high) / 2;
+            if (mid <= 1e-9)
+                break;
+            const order = this.orderForDelta(key, position, sign(delta) * mid, context.expectedEdge, context.score, "budget-check", new Date(), context.confidence);
+            if (orderBudgetCost(order) <= budget + 1e-9)
+                low = mid;
+            else
+                high = mid;
+        }
+        return low <= 1e-9 ? 0 : sign(delta) * low;
+    }
+    shouldSkipRebalanceDelta(key, position, targetSize, delta, now, hasOverride) {
         const isClosing = Math.abs(targetSize) <= 1e-9 && Math.abs(position.size) > 1e-9;
         const isOpening = Math.abs(position.size) <= 1e-9 && Math.abs(targetSize) > 1e-9;
         const isFlip = Math.abs(position.size) > 1e-9 && Math.abs(targetSize) > 1e-9 && !sameSign(position.size, targetSize);
         if (isClosing || isOpening || isFlip)
             return false;
-        if (this.effectiveMinOrderDelta() > 0 && Math.abs(delta) < this.effectiveMinOrderDelta())
+        if (this.effectiveMinOrderDelta() > 0 && this.marginForQuantity(key, position, delta) < this.effectiveMinOrderDelta())
             return true;
         if (!hasOverride && this.config.rebalanceIntervalMs > 0 && position.lastSignalAt) {
             return now.getTime() < position.lastSignalAt.getTime() + this.config.rebalanceIntervalMs;
@@ -801,20 +915,13 @@ export class PositionManager {
         const leverage = this.selectLeverage(key, confidence, edge, score);
         position.leverage = leverage;
         const metadata = this.instrumentFor(position.venue, position.instrument);
-        const asset = this.assets.asset(metadata.settlementCurrency);
-        const equity = positiveOr(asset?.equity, (asset?.cash ?? 0) + (asset?.used ?? 0), 1);
         const price = roundToTick(position.lastPrice ?? position.entryPrice ?? 0, metadata.tickSize);
         const requestedAbsDelta = Math.abs(delta);
-        let notional = requestedAbsDelta * equity * leverage;
-        const quantity = price > 0 ? roundDownToStep(notional / price, metadata.lotSize) : 0;
-        notional = quantity * price;
-        let executableAbsDelta = requestedAbsDelta;
-        if (equity > 0 && leverage > 0 && price > 0) {
-            executableAbsDelta = notional / (equity * leverage);
-        }
-        if (executableAbsDelta > requestedAbsDelta)
-            executableAbsDelta = requestedAbsDelta;
-        const executableDelta = sign(delta) * executableAbsDelta;
+        const contractNotional = instrumentContractNotional(price, metadata);
+        const quantity = contractNotional > 0 ? roundDownToStep(requestedAbsDelta, metadata.lotSize) : requestedAbsDelta;
+        const notional = quantity * contractNotional;
+        const margin = leverage > 0 ? notional / leverage : 0;
+        const executableDelta = sign(delta) * quantity;
         const reduceOnly = isExposureReduction(position.size, position.size + executableDelta);
         return {
             venue: position.venue,
@@ -829,8 +936,9 @@ export class PositionManager {
             score,
             expectedEdge: edge,
             feeRate,
-            estimatedFee: feeExposureForNotional(notional, feeRate, equity),
+            estimatedFee: feeValueForNotional(notional, feeRate),
             estimatedFeeValue: notional * feeRate,
+            margin,
             quantity,
             notional,
             settlementCurrency: metadata.settlementCurrency,
@@ -856,7 +964,7 @@ export class PositionManager {
             }
             if (opened)
                 position.openedAt = now;
-            const fee = feeExposureForMargin(Math.abs(delta), positiveOr(position.leverage, this.minLeverage(key), 1), feeRate);
+            const fee = this.feeForQuantity(key, position, Math.abs(delta), price, feeRate);
             position.fees = (position.fees ?? 0) + fee;
             position.realizedPnl = (position.realizedPnl ?? 0) - fee;
             position.size += delta;
@@ -865,8 +973,8 @@ export class PositionManager {
         if (price && price > 0)
             position.lastPrice = price;
         const closing = Math.min(Math.abs(position.size), Math.abs(delta));
-        const gross = move(position) * closing;
-        const fee = feeExposureForMargin(closing, positiveOr(position.leverage, this.minLeverage(key), 1), feeRate);
+        const gross = this.realizedGrossForQuantity(key, position, closing, price);
+        const fee = this.feeForQuantity(key, position, closing, price, feeRate);
         position.realizedGross = (position.realizedGross ?? 0) + gross;
         position.fees = (position.fees ?? 0) + fee;
         position.realizedPnl = (position.realizedPnl ?? 0) + gross - fee;
@@ -899,11 +1007,18 @@ export class PositionManager {
         position.openedAt = now;
         position.confidence = 0;
         position.realizedGross = 0;
-        position.fees = feeExposureForMargin(remaining, positiveOr(position.leverage, this.minLeverage(key), 1), this.takerFeeRate(key));
+        position.fees = this.feeForQuantity(key, position, remaining, price, this.takerFeeRate(key));
         position.realizedPnl = -position.fees;
     }
     effectiveMinOrderDelta() {
-        return this.config.minOrderDelta <= 0 ? 0 : this.config.minOrderDelta * this.config.positionSize;
+        return this.config.minOrderDelta <= 0 ? 0 : this.config.minOrderDelta * this.maxPortfolioMarginBudget();
+    }
+    minimumPositionSize() {
+        return this.config.minPositionSizeRatio <= 0 ? 0 : this.config.minPositionSizeRatio * this.portfolioCapital();
+    }
+    meetsMinimumPositionSize(size) {
+        const minimum = this.minimumPositionSize();
+        return minimum <= 0 || Math.abs(size) + 1e-9 >= minimum;
     }
     selectLeverage(key, confidence, edge, score = 0) {
         const minLev = this.minLeverage(key);
@@ -937,6 +1052,8 @@ export class PositionManager {
             lotSize: 0,
             minSize: 0,
             tickSize: 0,
+            contractValue: 0,
+            contractMultiplier: 0,
             maxLeverage: 0
         };
     }
@@ -960,15 +1077,24 @@ function websocketUrlFromBase(baseUrl) {
     return url.toString();
 }
 function normalizeConfig(config) {
+    let maxMarginRatio = config.maxMarginRatio ?? 0;
+    if (maxMarginRatio <= 0) {
+        const legacy = config.positionSize ?? productionDefaults.positionSize;
+        maxMarginRatio = legacy > 0 && legacy <= 1 ? legacy : productionDefaults.maxMarginRatio;
+    }
     return {
-        positionSize: Math.min(Math.max(config.positionSize ?? productionDefaults.positionSize, 0), 1),
+        maxMarginRatio: Math.min(Math.max(maxMarginRatio, 0), 1),
+        positionSize: Math.max(config.positionSize ?? productionDefaults.positionSize, 0),
         minExpectedEdge: Math.max(config.minExpectedEdge ?? productionDefaults.minExpectedEdge, 0),
         minOrderDelta: Math.min(Math.max(config.minOrderDelta ?? productionDefaults.minOrderDelta, 0), 1),
+        minPositionSizeRatio: Math.min(Math.max(config.minPositionSizeRatio ?? productionDefaults.minPositionSizeRatio, 0), 1),
         rebalanceIntervalMs: Math.max(config.rebalanceIntervalMs ?? productionDefaults.rebalanceIntervalMs, 0),
         makerFeeRate: Math.max(config.makerFeeRate ?? productionDefaults.makerFeeRate, 0),
         takerFeeRate: Math.max(config.takerFeeRate ?? productionDefaults.takerFeeRate, 0),
         minLeverage: Math.max(config.minLeverage ?? productionDefaults.minLeverage, 0),
         maxLeverage: Math.max(config.maxLeverage ?? productionDefaults.maxLeverage, 0),
+        availableMarginBuffer: Math.min(Math.max(config.availableMarginBuffer ?? productionDefaults.availableMarginBuffer, 0), 0.95),
+        executableMarginBuffer: Math.min(Math.max(config.executableMarginBuffer ?? productionDefaults.executableMarginBuffer, 0), 0.05),
         instruments: config.instruments ?? {},
         assetManager: config.assetManager ?? new AssetManager(),
         instrumentManager: config.instrumentManager ?? new InstrumentManager()
@@ -982,12 +1108,20 @@ function expectedEdge(signal) {
     return confidence * Math.max(signal.takeProfit, 0) - (1 - confidence) * Math.max(signal.stopLoss, 0);
 }
 function orderBudgetCost(order) {
-    return Math.abs(order.sizeDelta) + Math.max(0, order.estimatedFee);
+    return Math.max(0, order.margin) + Math.max(0, order.estimatedFee);
 }
-function feeExposureForNotional(notional, feeRate, equity) {
-    if (notional <= 0 || feeRate <= 0 || equity <= 0)
+function feeValueForNotional(notional, feeRate) {
+    if (notional <= 0 || feeRate <= 0)
         return 0;
-    return notional * feeRate / equity;
+    return notional * feeRate;
+}
+function instrumentContractNotional(price, metadata) {
+    if (price <= 0)
+        return 0;
+    return price * positiveOr(metadata.contractValue, 1) * positiveOr(metadata.contractMultiplier, 1);
+}
+function ratioOrZero(numerator, denominator) {
+    return denominator > 0 ? numerator / denominator : 0;
 }
 function feeExposureForMargin(margin, leverage, feeRate) {
     if (margin <= 0 || leverage <= 0 || feeRate <= 0)
