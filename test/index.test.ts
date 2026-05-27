@@ -511,6 +511,44 @@ describe("PositionManager", () => {
     expect(total).toBeLessThanOrEqual(1 + 1e-9);
   });
 
+  it("closes positions below the minimum position size ratio", () => {
+    const assets = new AssetManager();
+    assets.updateAsset({ currency: "USDT", cash: 1000, available: 0.5, used: 999.5, equity: 1000 });
+    const instruments = new InstrumentManager();
+    instruments.updateInstrument({ venue: "okx", instrument: "DUST-USDT-SWAP", settlementCurrency: "USDT" });
+    const manager = new PositionManager(undefined, productionPositionManagerConfig({
+      maxMarginRatio: 1,
+      minPositionSizeRatio: 0.01,
+      minExpectedEdge: 0,
+      minOrderDelta: 0,
+      rebalanceIntervalMs: 0,
+      assetManager: assets,
+      instrumentManager: instruments
+    }));
+    manager.addPosition({
+      venue: "okx",
+      instrument: "DUST-USDT-SWAP",
+      size: 0.005,
+      confidence: 0.5,
+      entryPrice: 100,
+      lastPrice: 100
+    });
+
+    const orders = manager.handleSignal({
+      venue: "okx",
+      instrument: "DUST-USDT-SWAP",
+      side: "buy",
+      confidence: 1,
+      takeProfit: 0.02,
+      stopLoss: 0.004,
+      price: 100
+    });
+    expect(orders).toHaveLength(1);
+    expect(orders[0]?.side).toBe("sell");
+    expect(orders[0]?.reason).toBe("closing");
+    expect(orders[0]?.targetSize).toBeCloseTo(0);
+  });
+
   it("reports stats by instrument and settlement currency", () => {
     const assets = new AssetManager();
     assets.updateAsset({ currency: "USDT", cash: 1000, available: 800, used: 200, equity: 1000 });

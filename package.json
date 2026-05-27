@@ -1,6 +1,6 @@
 {
   "name": "@grexie/signals-client",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Typed Node.js client for Grexie Signals websocket subscriptions and position management.",
   "type": "module",
   "main": "./dist/index.js",

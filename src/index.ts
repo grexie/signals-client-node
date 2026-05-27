@@ -894,14 +894,19 @@ export class PositionManager {
       const position = this.positionsByKey.get(key);
       if (!position) continue;
       const weight = weights.get(key) ?? 0;
-      const targetSize = targets.get(key) ?? 0;
+      let targetSize = targets.get(key) ?? 0;
+      if (Math.abs(position.size) > 1e-9 && !this.meetsMinimumPositionSize(this.positionMargin(key, position))) {
+        targetSize = 0;
+      } else if (targetSize !== 0 && !this.meetsMinimumPositionSize(this.marginForQuantity(key, position, targetSize))) {
+        if (Math.abs(position.size) <= 1e-9) {
+          position.confidence = weight;
+          continue;
+        }
+        targetSize = 0;
+      }
       let delta = targetSize - position.size;
       if (isFlipTarget(position.size, targetSize)) delta = -position.size;
       if (Math.abs(delta) <= 1e-9) {
-        position.confidence = weight;
-        continue;
-      }
-      if (targetSize !== 0 && !this.meetsMinimumPositionSize(this.marginForQuantity(key, position, targetSize)) && !isExposureReduction(position.size, targetSize)) {
         position.confidence = weight;
         continue;
       }
