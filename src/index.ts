@@ -841,7 +841,8 @@ export class PositionManager {
       this.positionsByKey.set(key, position);
     } else {
       const isFlip = sign(position.size) !== 0 && sign(position.size) !== targetSign;
-      if (!isFlip && this.config.rebalanceIntervalMs > 0 && position.lastSignalAt) {
+      const belowMinimum = !this.meetsMinimumPositionSize(this.positionMargin(key, position));
+      if (!isFlip && !belowMinimum && this.config.rebalanceIntervalMs > 0 && position.lastSignalAt) {
         if (now.getTime() < position.lastSignalAt.getTime() + this.config.rebalanceIntervalMs) return [];
       }
     }

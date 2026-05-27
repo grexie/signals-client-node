@@ -512,6 +512,7 @@ describe("PositionManager", () => {
   });
 
   it("closes positions below the minimum position size ratio", () => {
+    const lastSignalAt = new Date(Date.now() - 60_000);
     const assets = new AssetManager();
     assets.updateAsset({ currency: "USDT", cash: 1000, available: 0.5, used: 999.5, equity: 1000 });
     const instruments = new InstrumentManager();
@@ -521,7 +522,7 @@ describe("PositionManager", () => {
       minPositionSizeRatio: 0.01,
       minExpectedEdge: 0,
       minOrderDelta: 0,
-      rebalanceIntervalMs: 0,
+      rebalanceIntervalMs: 6 * 60 * 60 * 1000,
       assetManager: assets,
       instrumentManager: instruments
     }));
@@ -531,7 +532,8 @@ describe("PositionManager", () => {
       size: 0.005,
       confidence: 0.5,
       entryPrice: 100,
-      lastPrice: 100
+      lastPrice: 100,
+      lastSignalAt
     });
 
     const orders = manager.handleSignal({
@@ -541,7 +543,8 @@ describe("PositionManager", () => {
       confidence: 1,
       takeProfit: 0.02,
       stopLoss: 0.004,
-      price: 100
+      price: 100,
+      timestamp: new Date(lastSignalAt.getTime() + 60_000)
     });
     expect(orders).toHaveLength(1);
     expect(orders[0]?.side).toBe("sell");
