@@ -1213,7 +1213,8 @@ export class PositionManager {
     const price = roundToTick(position.lastPrice ?? position.entryPrice ?? 0, metadata.tickSize);
     const requestedAbsDelta = Math.abs(delta);
     const contractNotional = instrumentContractNotional(price, metadata);
-    const quantity = contractNotional > 0 ? roundDownToStep(requestedAbsDelta, metadata.lotSize) : requestedAbsDelta;
+    const closesToZero = Math.abs(position.size) > 1e-9 && Math.abs(position.size + delta) <= 1e-9;
+    const quantity = contractNotional > 0 && !closesToZero ? roundDownToStep(requestedAbsDelta, metadata.lotSize) : requestedAbsDelta;
     const notional = quantity * contractNotional;
     const margin = leverage > 0 ? notional / leverage : 0;
     const executableDelta = sign(delta) * quantity;

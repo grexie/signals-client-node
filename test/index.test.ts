@@ -516,7 +516,7 @@ describe("PositionManager", () => {
     const assets = new AssetManager();
     assets.updateAsset({ currency: "USDT", cash: 1000, available: 0.5, used: 999.5, equity: 1000 });
     const instruments = new InstrumentManager();
-    instruments.updateInstrument({ venue: "okx", instrument: "DUST-USDT-SWAP", settlementCurrency: "USDT" });
+    instruments.updateInstrument({ venue: "okx", instrument: "DUST-USDT-SWAP", settlementCurrency: "USDT", lotSize: 0.1, minSize: 0.1 });
     const manager = new PositionManager(undefined, productionPositionManagerConfig({
       maxMarginRatio: 1,
       minPositionSizeRatio: 0.01,
@@ -550,6 +550,8 @@ describe("PositionManager", () => {
     expect(orders[0]?.side).toBe("sell");
     expect(orders[0]?.reason).toBe("closing");
     expect(orders[0]?.targetSize).toBeCloseTo(0);
+    expect(orders[0]?.sizeDelta).toBeCloseTo(-0.005);
+    expect(orders[0]?.quantity).toBeCloseTo(0.005);
   });
 
   it("reports stats by instrument and settlement currency", () => {
