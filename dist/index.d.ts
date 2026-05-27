@@ -295,6 +295,7 @@ export declare class PositionManager {
     private allocateTargetSizes;
     private materializeRebalanceOrders;
     private availableExposureBudget;
+    private availablePortfolioBudget;
     private executableAllocationForBudget;
     private executableLotStepCost;
     private capOpeningDeltaToBudget;

@@ -711,15 +711,25 @@ export class PositionManager {
         return orders;
     }
     availableExposureBudget(currency) {
+        const portfolioBudget = this.availablePortfolioBudget();
         const asset = this.assets.asset(currency);
         if (!asset)
-            return Number.POSITIVE_INFINITY;
+            return portfolioBudget;
         const equity = positiveOr(asset.equity, asset.cash + asset.used, asset.cash);
         if (equity <= 0)
-            return asset.available > 0 ? Number.POSITIVE_INFINITY : 0;
+            return asset.available > 0 ? portfolioBudget : 0;
         if (asset.available <= 0)
             return 0;
-        return Math.max(0, asset.available / equity);
+        return Math.min(Math.max(0, asset.available / equity), portfolioBudget);
+    }
+    availablePortfolioBudget() {
+        if (this.config.positionSize <= 0)
+            return 0;
+        let used = 0;
+        for (const position of this.positionsByKey.values()) {
+            used += Math.abs(position.size);
+        }
+        return Math.max(0, this.config.positionSize - used);
     }
     executableAllocationForBudget(key, position, budget, context) {
         if (budget <= 1e-9)

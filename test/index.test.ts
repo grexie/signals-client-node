@@ -471,6 +471,46 @@ describe("PositionManager", () => {
     expect(orders[0]?.sizeDelta).toBeLessThan(0.05);
   });
 
+  it("caps openings to remaining portfolio budget without asset snapshots", () => {
+    const instruments = new InstrumentManager();
+    instruments.updateInstrument({ venue: "okx", instrument: "BTC-USDT-SWAP", settlementCurrency: "USDT" });
+    instruments.updateInstrument({ venue: "okx", instrument: "ETH-USDT-SWAP", settlementCurrency: "USDT" });
+    const manager = new PositionManager(undefined, productionPositionManagerConfig({
+      positionSize: 1,
+      minExpectedEdge: 0,
+      minOrderDelta: 0,
+      rebalanceIntervalMs: 6 * 60 * 60 * 1000,
+      minLeverage: 1,
+      maxLeverage: 1,
+      instrumentManager: instruments
+    }));
+
+    expect(manager.handleSignal({
+      venue: "okx",
+      instrument: "BTC-USDT-SWAP",
+      side: "buy",
+      confidence: 0.51,
+      takeProfit: 0.02,
+      stopLoss: 0.004,
+      price: 100,
+      timestamp: "2026-05-27T00:00:00Z"
+    })).toHaveLength(1);
+
+    manager.handleSignal({
+      venue: "okx",
+      instrument: "ETH-USDT-SWAP",
+      side: "buy",
+      confidence: 0.51,
+      takeProfit: 0.02,
+      stopLoss: 0.004,
+      price: 100,
+      timestamp: "2026-05-27T00:01:00Z"
+    });
+
+    const total = manager.positions().reduce((sum, position) => sum + Math.abs(position.size), 0);
+    expect(total).toBeLessThanOrEqual(1 + 1e-9);
+  });
+
   it("reports stats by instrument and settlement currency", () => {
     const assets = new AssetManager();
     assets.updateAsset({ currency: "USDT", cash: 1000, available: 800, used: 200, equity: 1000 });

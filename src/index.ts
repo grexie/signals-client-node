@@ -1011,12 +1011,22 @@ export class PositionManager {
   }
 
   private availableExposureBudget(currency: string): number {
+    const portfolioBudget = this.availablePortfolioBudget();
     const asset = this.assets.asset(currency);
-    if (!asset) return Number.POSITIVE_INFINITY;
+    if (!asset) return portfolioBudget;
     const equity = positiveOr(asset.equity, asset.cash + asset.used, asset.cash);
-    if (equity <= 0) return asset.available > 0 ? Number.POSITIVE_INFINITY : 0;
+    if (equity <= 0) return asset.available > 0 ? portfolioBudget : 0;
     if (asset.available <= 0) return 0;
-    return Math.max(0, asset.available / equity);
+    return Math.min(Math.max(0, asset.available / equity), portfolioBudget);
+  }
+
+  private availablePortfolioBudget(): number {
+    if (this.config.positionSize <= 0) return 0;
+    let used = 0;
+    for (const position of this.positionsByKey.values()) {
+      used += Math.abs(position.size);
+    }
+    return Math.max(0, this.config.positionSize - used);
   }
 
   private executableAllocationForBudget(key: string, position: Position, budget: number, context?: SignalContext): ExecutableAllocation {
