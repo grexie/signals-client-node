@@ -109,6 +109,22 @@ Call `manager.stats()` for realized and unrealized PnL in account value and perc
 
 Current Grexie Signals websocket messages expose strategy direction, confidence, risk levels, and component diagnostics. If your subscribed payload does not include signal prices, provide exchange marks through `updatePosition` or `updatePrice` before relying on realized PnL. Order sizing recommendations are returned as executable quantities/lots plus margin and fee estimates.
 
+## signalsbot Paper Trader Example
+
+The `examples/signalsbot` directory contains a command-line paper trader that reads `.env`, subscribes to `SIGNALS_INSTRUMENTS`, consumes OKX candles, connects with `SIGNALS_WEBSOCKET_TOKEN`, and persists the position manager `initialState`/`persist` workflow to a local JSON database.
+
+```sh
+cd examples/signalsbot
+cp .env.example .env
+npm install
+npm start -- papertrader
+npm start -- clean
+docker compose up --build
+docker compose run --rm signalsbot clean
+```
+
+Set `SIGNALS_WEBSOCKET_URL` to override `wss://signals.grexie.com/ws`. Docker Compose stores the local database in the `signalsbot-data` volume.
+
 ## Development
 
 ```sh
