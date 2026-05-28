@@ -353,7 +353,7 @@ export class PositionManager {
         const order = this.orderForDelta(key, position, delta, 0, undefined, "closing", now, position.confidence);
         if (!this.orderMeetsInstrumentMinimum(order))
             return [];
-        this.applyDelta(key, position, order.sizeDelta, position.lastPrice ?? position.entryPrice, this.takerFeeRate(key), now);
+        this.applyDelta(key, position, order.sizeDelta, position.lastPrice ?? position.entryPrice, this.takerFeeRate(key), now, "closing");
         return [order];
     }
     positions() {
@@ -460,9 +460,10 @@ export class PositionManager {
         if (!position)
             return [];
         position.lastPrice = price;
-        if (!exitTriggered(position, price))
+        updateExcursion(position);
+        const reason = exitReason(position, price);
+        if (!reason)
             return [];
-        const reason = takeProfitTriggered(position, price) ? "take_profit" : "stop_loss";
         const feeRate = reason === "take_profit" ? this.makerFeeRate(key) : this.takerFeeRate(key);
         const delta = -position.size;
         const order = this.orderForDelta(key, position, delta, 0, undefined, reason, timestamp, position.confidence);
@@ -471,7 +472,7 @@ export class PositionManager {
         order.estimatedFeeValue = order.notional * feeRate;
         if (!this.orderMeetsInstrumentMinimum(order))
             return [];
-        this.applyDelta(key, position, order.sizeDelta, price, feeRate, timestamp);
+        this.applyDelta(key, position, order.sizeDelta, price, feeRate, timestamp, reason);
         return [order];
     }
     handleEvent(event) {
@@ -504,6 +505,7 @@ export class PositionManager {
         const edge = feeAdjustedExpectedEdge(signal, this.takerFeeRate(key));
         if (this.config.minExpectedEdge > 0 && edge < this.config.minExpectedEdge)
             return [];
+        const trailing = this.trailingConfigForSignal(key, signal);
         let position = this.positionsByKey.get(key);
         const portfolioBudget = this.maxPortfolioMarginBudget();
         const minOrderDelta = this.effectiveMinOrderDelta();
@@ -520,6 +522,7 @@ export class PositionManager {
                 openedAt: now,
                 lastSignalAt: now
             };
+            resetExcursion(position);
             this.positionsByKey.set(key, position);
         }
         else {
@@ -544,6 +547,11 @@ export class PositionManager {
             position.takeProfit = blendRisk(position.takeProfit, signal.takeProfit, 0.5);
             position.stopLoss = blendRisk(position.stopLoss, signal.stopLoss, 0.5);
         }
+        if (trailing.activation > 0 && trailing.distance > 0) {
+            position.trailingStopActivation = trailing.activation;
+            position.trailingStopDistance = trailing.distance;
+            position.trailingStopMinProfit = trailing.minProfit;
+        }
         position.leverage = this.selectLeverage(key, targetConfidence, edge, signal.score);
         return this.rebalance(now, { [key]: targetSign }, {
             [key]: {
@@ -551,7 +559,10 @@ export class PositionManager {
                 score: signal.score,
                 expectedEdge: edge,
                 takeProfit: signal.takeProfit,
-                stopLoss: signal.stopLoss
+                stopLoss: signal.stopLoss,
+                trailingStopActivation: trailing.activation,
+                trailingStopDistance: trailing.distance,
+                trailingStopMinProfit: trailing.minProfit
             }
         });
     }
@@ -732,6 +743,9 @@ export class PositionManager {
             const order = this.orderForDelta(candidate.key, candidate.position, delta, candidate.context.expectedEdge, candidate.context.score, candidate.reason, now, candidate.context.confidence);
             order.takeProfit = candidate.context.takeProfit;
             order.stopLoss = candidate.context.stopLoss;
+            order.trailingStopActivation = candidate.context.trailingStopActivation;
+            order.trailingStopDistance = candidate.context.trailingStopDistance;
+            order.trailingStopMinProfit = candidate.context.trailingStopMinProfit;
             if (!this.orderMeetsInstrumentMinimum(order)) {
                 candidate.position.confidence = candidate.weight;
                 continue;
@@ -740,10 +754,16 @@ export class PositionManager {
             if (openingExposureByCurrency && !isExposureReduction(order.previousSize, order.targetSize)) {
                 openingExposureByCurrency.set(order.settlementCurrency, (openingExposureByCurrency.get(order.settlementCurrency) ?? 0) + orderBudgetCost(order));
             }
-            this.applyDelta(candidate.key, candidate.position, order.sizeDelta, candidate.position.lastPrice ?? candidate.position.entryPrice, this.takerFeeRate(candidate.key), now);
+            this.applyDelta(candidate.key, candidate.position, order.sizeDelta, candidate.position.lastPrice ?? candidate.position.entryPrice, this.takerFeeRate(candidate.key), now, candidate.reason);
             const current = this.positionsByKey.get(candidate.key);
-            if (current)
+            if (current) {
                 current.confidence = candidate.weight;
+                if ((order.trailingStopActivation ?? 0) > 0 && (order.trailingStopDistance ?? 0) > 0) {
+                    current.trailingStopActivation = order.trailingStopActivation;
+                    current.trailingStopDistance = order.trailingStopDistance;
+                    current.trailingStopMinProfit = order.trailingStopMinProfit;
+                }
+            }
         }
         return orders;
     }
@@ -958,7 +978,7 @@ export class PositionManager {
             timestamp: now
         };
     }
-    applyDelta(key, position, delta, price, feeRate, now) {
+    applyDelta(key, position, delta, price, feeRate, now, reason = "") {
         if (Math.abs(delta) <= 1e-9)
             return;
         if (position.size === 0 || sameSign(position.size, delta)) {
@@ -976,10 +996,12 @@ export class PositionManager {
             position.fees = (position.fees ?? 0) + fee;
             position.realizedPnl = (position.realizedPnl ?? 0) - fee;
             position.size += delta;
+            resetExcursion(position);
             return;
         }
         if (price && price > 0)
             position.lastPrice = price;
+        updateExcursion(position);
         const closing = Math.min(Math.abs(position.size), Math.abs(delta));
         const gross = this.realizedGrossForQuantity(key, position, closing, price);
         const fee = this.feeForQuantity(key, position, closing, price, feeRate);
@@ -993,9 +1015,13 @@ export class PositionManager {
             size: closing,
             entryPrice: position.entryPrice,
             exitPrice: price,
+            exitMove: move(position),
             realizedGross: position.realizedGross,
             fees: position.fees,
             realizedPnl: position.realizedPnl,
+            mfe: position.mfe,
+            mae: position.mae,
+            exitReason: reason,
             openedAt: position.openedAt,
             closedAt: now
         };
@@ -1017,6 +1043,7 @@ export class PositionManager {
         position.realizedGross = 0;
         position.fees = this.feeForQuantity(key, position, remaining, price, this.takerFeeRate(key));
         position.realizedPnl = -position.fees;
+        resetExcursion(position);
     }
     effectiveMinOrderDelta() {
         return this.config.minOrderDelta <= 0 ? 0 : this.config.minOrderDelta * this.maxPortfolioMarginBudget();
@@ -1051,6 +1078,23 @@ export class PositionManager {
         const [venue, instrument] = splitKey(key);
         const metadataMax = this.instrumentMetadata.instrument(venue, instrument)?.maxLeverage ?? 0;
         return metadataMax > 0 ? Math.min(configured || metadataMax, metadataMax) : configured;
+    }
+    trailingConfigForSignal(key, signal) {
+        const override = this.config.instruments[key];
+        let activation = signal.trailingStopActivation ?? override?.trailingStopActivation ?? 0;
+        let distance = signal.trailingStopDistance ?? override?.trailingStopDistance ?? 0;
+        let minProfit = signal.trailingStopMinProfit ?? override?.trailingStopMinProfit ?? 0;
+        if (activation <= 0 || distance <= 0)
+            return { activation: 0, distance: 0, minProfit: 0 };
+        activation = Math.max(0, activation);
+        distance = Math.max(0, distance);
+        minProfit = Math.max(0, minProfit);
+        const feeFloor = 2 * this.takerFeeRate(key);
+        if (minProfit < feeFloor)
+            minProfit = feeFloor;
+        if (activation < minProfit + 1e-9)
+            activation = minProfit + Math.min(distance, feeFloor);
+        return { activation, distance, minProfit };
     }
     instrumentFor(venue, instrument) {
         return this.instrumentMetadata.instrument(venue, instrument) ?? {
@@ -1232,6 +1276,35 @@ function stopLossTriggered(position, price) {
 }
 function exitTriggered(position, price) {
     return takeProfitTriggered(position, price) || stopLossTriggered(position, price);
+}
+function exitReason(position, price) {
+    if (takeProfitTriggered(position, price))
+        return "take_profit";
+    if (stopLossTriggered(position, price))
+        return "stop_loss";
+    if (trailingStopTriggered(position))
+        return "trailing_stop";
+    return undefined;
+}
+function trailingStopTriggered(position) {
+    if (!position.trailingStopActivation || !position.trailingStopDistance)
+        return false;
+    if ((position.mfe ?? 0) + 1e-9 < position.trailingStopActivation)
+        return false;
+    let floor = (position.mfe ?? 0) - position.trailingStopDistance;
+    if ((position.trailingStopMinProfit ?? 0) > floor)
+        floor = position.trailingStopMinProfit ?? 0;
+    return move(position) <= floor + 1e-9;
+}
+function resetExcursion(position) {
+    const currentMove = move(position);
+    position.mfe = Math.max(currentMove, 0);
+    position.mae = Math.min(currentMove, 0);
+}
+function updateExcursion(position) {
+    const currentMove = move(position);
+    position.mfe = Math.max(position.mfe ?? 0, currentMove);
+    position.mae = Math.min(position.mae ?? 0, currentMove);
 }
 function orderReason(position, targetSize) {
     if (Math.abs(position.size) <= 1e-9)

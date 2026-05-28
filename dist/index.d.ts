@@ -20,6 +20,9 @@ export interface Signal {
     side: Side;
     takeProfit: number;
     stopLoss: number;
+    trailingStopActivation?: number;
+    trailingStopDistance?: number;
+    trailingStopMinProfit?: number;
     score?: number;
     components?: SignalComponent[];
     modelVariant?: string;
@@ -128,6 +131,9 @@ export interface InstrumentConfig {
     takerFeeRate?: number;
     minLeverage?: number;
     maxLeverage?: number;
+    trailingStopActivation?: number;
+    trailingStopDistance?: number;
+    trailingStopMinProfit?: number;
 }
 export interface AssetSnapshot {
     currency: string;
@@ -187,7 +193,12 @@ export interface Position {
     lastPrice?: number;
     takeProfit?: number;
     stopLoss?: number;
+    trailingStopActivation?: number;
+    trailingStopDistance?: number;
+    trailingStopMinProfit?: number;
     leverage?: number;
+    mfe?: number;
+    mae?: number;
     realizedGross?: number;
     fees?: number;
     realizedPnl?: number;
@@ -219,6 +230,9 @@ export interface Order {
     leverage: number;
     takeProfit?: number;
     stopLoss?: number;
+    trailingStopActivation?: number;
+    trailingStopDistance?: number;
+    trailingStopMinProfit?: number;
     reduceOnly?: boolean;
     timestamp: Date;
     subscriptionId?: number;
@@ -231,9 +245,13 @@ export interface ClosedTrade {
     size: number;
     entryPrice?: number;
     exitPrice?: number;
+    exitMove?: number;
     realizedGross: number;
     fees: number;
     realizedPnl: number;
+    mfe?: number;
+    mae?: number;
+    exitReason?: string;
     openedAt?: Date;
     closedAt: Date;
 }
@@ -328,6 +346,7 @@ export declare class PositionManager {
     private takerFeeRate;
     private minLeverage;
     private maxLeverage;
+    private trailingConfigForSignal;
     private instrumentFor;
     private orderMeetsInstrumentMinimum;
 }

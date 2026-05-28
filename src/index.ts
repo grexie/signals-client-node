@@ -23,6 +23,9 @@ export interface Signal {
   side: Side;
   takeProfit: number;
   stopLoss: number;
+  trailingStopActivation?: number;
+  trailingStopDistance?: number;
+  trailingStopMinProfit?: number;
   score?: number;
   components?: SignalComponent[];
   modelVariant?: string;
@@ -390,6 +393,9 @@ export interface InstrumentConfig {
   takerFeeRate?: number;
   minLeverage?: number;
   maxLeverage?: number;
+  trailingStopActivation?: number;
+  trailingStopDistance?: number;
+  trailingStopMinProfit?: number;
 }
 
 export interface AssetSnapshot {
@@ -494,7 +500,12 @@ export interface Position {
   lastPrice?: number;
   takeProfit?: number;
   stopLoss?: number;
+  trailingStopActivation?: number;
+  trailingStopDistance?: number;
+  trailingStopMinProfit?: number;
   leverage?: number;
+  mfe?: number;
+  mae?: number;
   realizedGross?: number;
   fees?: number;
   realizedPnl?: number;
@@ -527,6 +538,9 @@ export interface Order {
   leverage: number;
   takeProfit?: number;
   stopLoss?: number;
+  trailingStopActivation?: number;
+  trailingStopDistance?: number;
+  trailingStopMinProfit?: number;
   reduceOnly?: boolean;
   timestamp: Date;
   subscriptionId?: number;
@@ -540,9 +554,13 @@ export interface ClosedTrade {
   size: number;
   entryPrice?: number;
   exitPrice?: number;
+  exitMove?: number;
   realizedGross: number;
   fees: number;
   realizedPnl: number;
+  mfe?: number;
+  mae?: number;
+  exitReason?: string;
   openedAt?: Date;
   closedAt: Date;
 }
@@ -675,7 +693,7 @@ export class PositionManager {
     const delta = -position.size;
     const order = this.orderForDelta(key, position, delta, 0, undefined, "closing", now, position.confidence);
     if (!this.orderMeetsInstrumentMinimum(order)) return [];
-    this.applyDelta(key, position, order.sizeDelta, position.lastPrice ?? position.entryPrice, this.takerFeeRate(key), now);
+    this.applyDelta(key, position, order.sizeDelta, position.lastPrice ?? position.entryPrice, this.takerFeeRate(key), now, "closing");
     return [order];
   }
 
@@ -783,8 +801,9 @@ export class PositionManager {
     const position = this.positionsByKey.get(key);
     if (!position) return [];
     position.lastPrice = price;
-    if (!exitTriggered(position, price)) return [];
-    const reason = takeProfitTriggered(position, price) ? "take_profit" : "stop_loss";
+    updateExcursion(position);
+    const reason = exitReason(position, price);
+    if (!reason) return [];
     const feeRate = reason === "take_profit" ? this.makerFeeRate(key) : this.takerFeeRate(key);
     const delta = -position.size;
     const order = this.orderForDelta(key, position, delta, 0, undefined, reason, timestamp, position.confidence);
@@ -792,7 +811,7 @@ export class PositionManager {
     order.estimatedFee = feeValueForNotional(order.notional, feeRate);
     order.estimatedFeeValue = order.notional * feeRate;
     if (!this.orderMeetsInstrumentMinimum(order)) return [];
-    this.applyDelta(key, position, order.sizeDelta, price, feeRate, timestamp);
+    this.applyDelta(key, position, order.sizeDelta, price, feeRate, timestamp, reason);
     return [order];
   }
 
@@ -822,6 +841,7 @@ export class PositionManager {
     if (!targetSign || targetConfidence <= 0) return [];
     const edge = feeAdjustedExpectedEdge(signal, this.takerFeeRate(key));
     if (this.config.minExpectedEdge > 0 && edge < this.config.minExpectedEdge) return [];
+    const trailing = this.trailingConfigForSignal(key, signal);
 
     let position = this.positionsByKey.get(key);
     const portfolioBudget = this.maxPortfolioMarginBudget();
@@ -838,6 +858,7 @@ export class PositionManager {
         openedAt: now,
         lastSignalAt: now
       };
+      resetExcursion(position);
       this.positionsByKey.set(key, position);
     } else {
       const isFlip = sign(position.size) !== 0 && sign(position.size) !== targetSign;
@@ -860,6 +881,11 @@ export class PositionManager {
       position.takeProfit = blendRisk(position.takeProfit, signal.takeProfit, 0.5);
       position.stopLoss = blendRisk(position.stopLoss, signal.stopLoss, 0.5);
     }
+    if (trailing.activation > 0 && trailing.distance > 0) {
+      position.trailingStopActivation = trailing.activation;
+      position.trailingStopDistance = trailing.distance;
+      position.trailingStopMinProfit = trailing.minProfit;
+    }
     position.leverage = this.selectLeverage(key, targetConfidence, edge, signal.score);
 
     return this.rebalance(now, { [key]: targetSign }, {
@@ -868,7 +894,10 @@ export class PositionManager {
         score: signal.score,
         expectedEdge: edge,
         takeProfit: signal.takeProfit,
-        stopLoss: signal.stopLoss
+        stopLoss: signal.stopLoss,
+        trailingStopActivation: trailing.activation,
+        trailingStopDistance: trailing.distance,
+        trailingStopMinProfit: trailing.minProfit
       }
     });
   }
@@ -1037,6 +1066,9 @@ export class PositionManager {
       );
       order.takeProfit = candidate.context.takeProfit;
       order.stopLoss = candidate.context.stopLoss;
+      order.trailingStopActivation = candidate.context.trailingStopActivation;
+      order.trailingStopDistance = candidate.context.trailingStopDistance;
+      order.trailingStopMinProfit = candidate.context.trailingStopMinProfit;
       if (!this.orderMeetsInstrumentMinimum(order)) {
         candidate.position.confidence = candidate.weight;
         continue;
@@ -1045,9 +1077,16 @@ export class PositionManager {
       if (openingExposureByCurrency && !isExposureReduction(order.previousSize, order.targetSize)) {
         openingExposureByCurrency.set(order.settlementCurrency, (openingExposureByCurrency.get(order.settlementCurrency) ?? 0) + orderBudgetCost(order));
       }
-      this.applyDelta(candidate.key, candidate.position, order.sizeDelta, candidate.position.lastPrice ?? candidate.position.entryPrice, this.takerFeeRate(candidate.key), now);
+      this.applyDelta(candidate.key, candidate.position, order.sizeDelta, candidate.position.lastPrice ?? candidate.position.entryPrice, this.takerFeeRate(candidate.key), now, candidate.reason);
       const current = this.positionsByKey.get(candidate.key);
-      if (current) current.confidence = candidate.weight;
+      if (current) {
+        current.confidence = candidate.weight;
+        if ((order.trailingStopActivation ?? 0) > 0 && (order.trailingStopDistance ?? 0) > 0) {
+          current.trailingStopActivation = order.trailingStopActivation;
+          current.trailingStopDistance = order.trailingStopDistance;
+          current.trailingStopMinProfit = order.trailingStopMinProfit;
+        }
+      }
     }
     return orders;
   }
@@ -1247,7 +1286,7 @@ export class PositionManager {
     };
   }
 
-  private applyDelta(key: string, position: Position, delta: number, price: number | undefined, feeRate: number, now: Date): void {
+  private applyDelta(key: string, position: Position, delta: number, price: number | undefined, feeRate: number, now: Date, reason = ""): void {
     if (Math.abs(delta) <= 1e-9) return;
     if (position.size === 0 || sameSign(position.size, delta)) {
       const opened = Math.abs(position.size) <= 1e-9;
@@ -1263,9 +1302,11 @@ export class PositionManager {
       position.fees = (position.fees ?? 0) + fee;
       position.realizedPnl = (position.realizedPnl ?? 0) - fee;
       position.size += delta;
+      resetExcursion(position);
       return;
     }
     if (price && price > 0) position.lastPrice = price;
+    updateExcursion(position);
     const closing = Math.min(Math.abs(position.size), Math.abs(delta));
     const gross = this.realizedGrossForQuantity(key, position, closing, price);
     const fee = this.feeForQuantity(key, position, closing, price, feeRate);
@@ -1279,9 +1320,13 @@ export class PositionManager {
       size: closing,
       entryPrice: position.entryPrice,
       exitPrice: price,
+      exitMove: move(position),
       realizedGross: position.realizedGross,
       fees: position.fees,
       realizedPnl: position.realizedPnl,
+      mfe: position.mfe,
+      mae: position.mae,
+      exitReason: reason,
       openedAt: position.openedAt,
       closedAt: now
     };
@@ -1303,6 +1348,7 @@ export class PositionManager {
     position.realizedGross = 0;
     position.fees = this.feeForQuantity(key, position, remaining, price, this.takerFeeRate(key));
     position.realizedPnl = -position.fees;
+    resetExcursion(position);
   }
 
   private effectiveMinOrderDelta(): number {
@@ -1346,6 +1392,21 @@ export class PositionManager {
     return metadataMax > 0 ? Math.min(configured || metadataMax, metadataMax) : configured;
   }
 
+  private trailingConfigForSignal(key: string, signal: Signal): { activation: number; distance: number; minProfit: number } {
+    const override = this.config.instruments[key];
+    let activation = signal.trailingStopActivation ?? override?.trailingStopActivation ?? 0;
+    let distance = signal.trailingStopDistance ?? override?.trailingStopDistance ?? 0;
+    let minProfit = signal.trailingStopMinProfit ?? override?.trailingStopMinProfit ?? 0;
+    if (activation <= 0 || distance <= 0) return { activation: 0, distance: 0, minProfit: 0 };
+    activation = Math.max(0, activation);
+    distance = Math.max(0, distance);
+    minProfit = Math.max(0, minProfit);
+    const feeFloor = 2 * this.takerFeeRate(key);
+    if (minProfit < feeFloor) minProfit = feeFloor;
+    if (activation < minProfit + 1e-9) activation = minProfit + Math.min(distance, feeFloor);
+    return { activation, distance, minProfit };
+  }
+
   private instrumentFor(venue: string, instrument: string): Required<InstrumentMetadata> {
     return this.instrumentMetadata.instrument(venue, instrument) ?? {
       venue,
@@ -1374,6 +1435,9 @@ interface SignalContext {
   expectedEdge: number;
   takeProfit?: number;
   stopLoss?: number;
+  trailingStopActivation?: number;
+  trailingStopDistance?: number;
+  trailingStopMinProfit?: number;
 }
 
 interface RebalanceCandidate {
@@ -1553,6 +1617,33 @@ function stopLossTriggered(position: Position, price: number): boolean {
 
 function exitTriggered(position: Position, price: number): boolean {
   return takeProfitTriggered(position, price) || stopLossTriggered(position, price);
+}
+
+function exitReason(position: Position, price: number): string | undefined {
+  if (takeProfitTriggered(position, price)) return "take_profit";
+  if (stopLossTriggered(position, price)) return "stop_loss";
+  if (trailingStopTriggered(position)) return "trailing_stop";
+  return undefined;
+}
+
+function trailingStopTriggered(position: Position): boolean {
+  if (!position.trailingStopActivation || !position.trailingStopDistance) return false;
+  if ((position.mfe ?? 0) + 1e-9 < position.trailingStopActivation) return false;
+  let floor = (position.mfe ?? 0) - position.trailingStopDistance;
+  if ((position.trailingStopMinProfit ?? 0) > floor) floor = position.trailingStopMinProfit ?? 0;
+  return move(position) <= floor + 1e-9;
+}
+
+function resetExcursion(position: Position): void {
+  const currentMove = move(position);
+  position.mfe = Math.max(currentMove, 0);
+  position.mae = Math.min(currentMove, 0);
+}
+
+function updateExcursion(position: Position): void {
+  const currentMove = move(position);
+  position.mfe = Math.max(position.mfe ?? 0, currentMove);
+  position.mae = Math.min(position.mae ?? 0, currentMove);
 }
 
 function orderReason(position: Position, targetSize: number): string {

@@ -202,6 +202,38 @@ describe("PositionManager", () => {
     expect(orderBudgetCost(orders[0])).toBeCloseTo(0.1);
   });
 
+  it("closes on trailing stop after favorable giveback", () => {
+    const manager = new PositionManager(undefined, productionPositionManagerConfig({
+      maxMarginRatio: 0.1,
+      minExpectedEdge: 0,
+      minOrderDelta: 0
+    }));
+    manager.instrumentManager().updateInstrument({ venue: "okx", instrument: "BTC-USDT-SWAP" });
+    const orders = manager.handleSignal({
+      venue: "okx",
+      instrument: "BTC-USDT-SWAP",
+      side: "buy",
+      confidence: 0.8,
+      takeProfit: 0.5,
+      stopLoss: 0.2,
+      price: 100,
+      timestamp: "2026-05-26T00:00:00Z",
+      trailingStopActivation: 0.02,
+      trailingStopDistance: 0.01,
+      trailingStopMinProfit: 0.001
+    });
+    expect(orders).toHaveLength(1);
+    expect(orders[0]?.trailingStopActivation).toBeCloseTo(0.02);
+    expect(manager.updatePrice("okx", "BTC-USDT-SWAP", 103, new Date("2026-05-26T00:01:00Z"))).toHaveLength(0);
+    const closed = manager.updatePrice("okx", "BTC-USDT-SWAP", 101.8, new Date("2026-05-26T00:02:00Z"));
+    expect(closed).toHaveLength(1);
+    expect(closed[0]?.reason).toBe("trailing_stop");
+    const trade = manager.closedTrades()[0];
+    expect(trade?.exitReason).toBe("trailing_stop");
+    expect(trade?.mfe ?? 0).toBeGreaterThan(0.029);
+    expect(trade?.realizedPnl ?? 0).toBeGreaterThan(0);
+  });
+
   it("quantizes emitted target size to executable lots", () => {
     const assets = new AssetManager();
     assets.updateAsset({ currency: "USDT", equity: 1000, available: 1000 });
