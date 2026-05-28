@@ -45,6 +45,7 @@ export interface Signal {
     artifactID?: string;
     artifactVersion?: string;
     rejectedReason?: string;
+    managePositionsOnly?: boolean;
     timestamp?: string | Date;
     price?: number;
 }
@@ -134,6 +135,7 @@ export interface InstrumentConfig {
     trailingStopActivation?: number;
     trailingStopDistance?: number;
     trailingStopMinProfit?: number;
+    managePositionsOnly?: boolean;
 }
 export interface AssetSnapshot {
     currency: string;
