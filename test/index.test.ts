@@ -20,12 +20,13 @@ describe("parseEvent", () => {
       instrument: "BTC-USDT-SWAP",
       timestamp: "2026-05-26T00:00:00Z",
       replay: true,
-      signal: { confidence: 0.8, side: "buy", takeProfit: 0.01, stopLoss: 0.004 }
+      signal: { confidence: 0.8, side: "buy", takeProfit: 0.01, stopLoss: 0.004, managePositionsOnly: true }
     }));
     expect(event.type).toBe("signal");
     if (event.type !== "signal") return;
     expect(event.signal.venue).toBe("okx");
     expect(event.signal.instrument).toBe("BTC-USDT-SWAP");
+    expect(event.signal.managePositionsOnly).toBe(true);
     expect(event.replay).toBe(true);
   });
 
@@ -200,6 +201,85 @@ describe("PositionManager", () => {
     });
     expect(orders).toHaveLength(1);
     expect(orderBudgetCost(orders[0])).toBeCloseTo(0.1);
+  });
+
+  it("does not open or increase exposure for managePositionsOnly signals", () => {
+    const manager = new PositionManager(undefined, productionPositionManagerConfig({
+      maxMarginRatio: 0.1,
+      minExpectedEdge: 0.01,
+      minOrderDelta: 0,
+      minLeverage: 1,
+      maxLeverage: 5
+    }));
+    manager.instrumentManager().updateInstrument({ venue: "okx", instrument: "BTC-USDT-SWAP" });
+    const blockedOpen = manager.handleSignal({
+      venue: "okx",
+      instrument: "BTC-USDT-SWAP",
+      side: "buy",
+      confidence: 0.9,
+      takeProfit: 0.02,
+      stopLoss: 0.004,
+      price: 100,
+      timestamp: "2026-05-26T00:00:00Z",
+      managePositionsOnly: true
+    });
+    expect(blockedOpen).toHaveLength(0);
+    expect(manager.positions()).toHaveLength(0);
+
+    const opened = manager.handleSignal({
+      venue: "okx",
+      instrument: "BTC-USDT-SWAP",
+      side: "buy",
+      confidence: 0.7,
+      takeProfit: 0.02,
+      stopLoss: 0.004,
+      price: 100,
+      timestamp: "2026-05-26T00:01:00Z"
+    });
+    expect(opened).toHaveLength(1);
+    expect(opened[0]?.reason).toBe("opening");
+
+    const sameSide = manager.handleSignal({
+      venue: "okx",
+      instrument: "BTC-USDT-SWAP",
+      side: "buy",
+      confidence: 1,
+      takeProfit: 0.02,
+      stopLoss: 0.004,
+      price: 100,
+      timestamp: "2026-05-26T00:02:00Z",
+      managePositionsOnly: true
+    });
+    expect(sameSide).toHaveLength(0);
+
+    const closed = manager.handleSignal({
+      venue: "okx",
+      instrument: "BTC-USDT-SWAP",
+      side: "sell",
+      confidence: 0.51,
+      takeProfit: 0.02,
+      stopLoss: 0.004,
+      price: 99,
+      timestamp: "2026-05-26T00:03:00Z",
+      managePositionsOnly: true
+    });
+    expect(closed).toHaveLength(1);
+    expect(closed[0]?.reason).toBe("closing");
+    expect(closed[0]?.targetSize).toBeCloseTo(0);
+
+    const blockedShort = manager.handleSignal({
+      venue: "okx",
+      instrument: "BTC-USDT-SWAP",
+      side: "sell",
+      confidence: 0.51,
+      takeProfit: 0.02,
+      stopLoss: 0.004,
+      price: 99,
+      timestamp: "2026-05-26T00:04:00Z",
+      managePositionsOnly: true
+    });
+    expect(blockedShort).toHaveLength(0);
+    expect(manager.positions()).toHaveLength(0);
   });
 
   it("closes on trailing stop after favorable giveback", () => {

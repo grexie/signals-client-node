@@ -519,13 +519,15 @@ export class PositionManager {
         if (!targetSign || targetConfidence <= 0)
             return [];
         const edge = feeAdjustedExpectedEdge(signal, this.takerFeeRate(key));
-        if (this.config.minExpectedEdge > 0 && edge < this.config.minExpectedEdge)
+        if (this.config.minExpectedEdge > 0 && edge < this.config.minExpectedEdge && !signal.managePositionsOnly)
             return [];
         const trailing = this.trailingConfigForSignal(key, signal);
         let position = this.positionsByKey.get(key);
         const portfolioBudget = this.maxPortfolioMarginBudget();
         const minOrderDelta = this.effectiveMinOrderDelta();
         if (!position || Math.abs(position.size) <= 1e-9) {
+            if (signal.managePositionsOnly)
+                return [];
             if (portfolioBudget < minOrderDelta || !this.meetsMinimumPositionSize(portfolioBudget))
                 return [];
             position = {
@@ -549,7 +551,13 @@ export class PositionManager {
                     return [];
             }
         }
-        position.confidence = targetConfidence;
+        if (signal.managePositionsOnly && sign(position.size) === 0)
+            return [];
+        const contextConfidence = signal.managePositionsOnly && sign(position.size) === targetSign
+            ? Math.min(targetConfidence, clamp01(position.confidence))
+            : targetConfidence;
+        const overrideSide = signal.managePositionsOnly && sign(position.size) !== targetSign ? 0 : targetSign;
+        position.confidence = contextConfidence;
         position.lastSignalAt = now;
         if (signal.price && signal.price > 0) {
             position.lastPrice = signal.price;
@@ -568,17 +576,18 @@ export class PositionManager {
             position.trailingStopDistance = trailing.distance;
             position.trailingStopMinProfit = trailing.minProfit;
         }
-        position.leverage = this.selectLeverage(key, targetConfidence, edge, signal.score);
-        const orders = this.rebalance(now, { [key]: targetSign }, {
+        position.leverage = this.selectLeverage(key, contextConfidence, edge, signal.score);
+        const orders = this.rebalance(now, { [key]: overrideSide }, {
             [key]: {
-                confidence: targetConfidence,
+                confidence: contextConfidence,
                 score: signal.score,
                 expectedEdge: edge,
                 takeProfit: signal.takeProfit,
                 stopLoss: signal.stopLoss,
                 trailingStopActivation: trailing.activation,
                 trailingStopDistance: trailing.distance,
-                trailingStopMinProfit: trailing.minProfit
+                trailingStopMinProfit: trailing.minProfit,
+                managePositionsOnly: signal.managePositionsOnly ?? false
             }
         });
         this.persist();
@@ -637,6 +646,10 @@ export class PositionManager {
                 }
                 targetSize = 0;
             }
+            const context = contexts[key] ?? { confidence: position.confidence, expectedEdge: 0 };
+            if (context.managePositionsOnly) {
+                targetSize = managePositionsOnlyTargetSize(position.size, targetSize);
+            }
             let delta = targetSize - position.size;
             if (isFlipTarget(position.size, targetSize))
                 delta = -position.size;
@@ -649,7 +662,6 @@ export class PositionManager {
                 position.confidence = weight;
                 continue;
             }
-            const context = contexts[key] ?? { confidence: position.confidence, expectedEdge: 0 };
             const candidate = {
                 key,
                 position,
@@ -759,6 +771,10 @@ export class PositionManager {
         const orders = [];
         for (const candidate of candidates) {
             let delta = candidate.delta;
+            if (candidate.context.managePositionsOnly && !isExposureReduction(candidate.position.size, candidate.position.size + delta)) {
+                candidate.position.confidence = candidate.weight;
+                continue;
+            }
             if (openingExposureByCurrency && !isExposureReduction(candidate.position.size, candidate.position.size + delta)) {
                 const metadata = this.instrumentFor(candidate.position.venue, candidate.position.instrument);
                 const used = openingExposureByCurrency.get(metadata.settlementCurrency) ?? 0;
@@ -1352,6 +1368,17 @@ function orderReason(position, targetSize) {
 }
 function isFlipTarget(previousSize, targetSize) {
     return Math.abs(previousSize) > 1e-9 && Math.abs(targetSize) > 1e-9 && !sameSign(previousSize, targetSize);
+}
+function managePositionsOnlyTargetSize(previousSize, targetSize) {
+    if (Math.abs(previousSize) <= 1e-9)
+        return 0;
+    if (Math.abs(targetSize) <= 1e-9)
+        return 0;
+    if (!sameSign(previousSize, targetSize))
+        return 0;
+    if (Math.abs(targetSize) > Math.abs(previousSize))
+        return previousSize;
+    return targetSize;
 }
 function isExposureReduction(previousSize, targetSize) {
     if (Math.abs(previousSize) <= 1e-9)
