@@ -647,9 +647,9 @@ export function productionPositionManagerConfig(overrides: PositionManagerConfig
 
 export class PositionManager {
   private readonly client?: SignalEventSource;
-  private readonly config: NormalizedPositionManagerConfig;
-  private readonly assets: AssetManager;
-  private readonly instrumentMetadata: InstrumentManager;
+  private config: NormalizedPositionManagerConfig;
+  private assets: AssetManager;
+  private instrumentMetadata: InstrumentManager;
   private readonly positionsByKey = new Map<string, Position>();
   private readonly closed: ClosedTrade[] = [];
 
@@ -667,6 +667,20 @@ export class PositionManager {
 
   instrumentManager(): InstrumentManager {
     return this.instrumentMetadata;
+  }
+
+  updateConfig(config: PositionManagerConfig): void {
+    const next = normalizeConfig({
+      ...config,
+      instruments: config.instruments ?? { ...this.config.instruments },
+      assetManager: config.assetManager ?? this.assets,
+      instrumentManager: config.instrumentManager ?? this.instrumentMetadata,
+      initialState: undefined,
+      persist: config.persist ?? this.config.persist
+    });
+    this.config = next;
+    this.assets = next.assetManager;
+    this.instrumentMetadata = next.instrumentManager;
   }
 
   async *run(signal?: AbortSignal): AsyncIterableIterator<Order> {

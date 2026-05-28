@@ -306,14 +306,15 @@ export interface PositionStats {
 export declare function productionPositionManagerConfig(overrides?: PositionManagerConfig): PositionManagerConfig;
 export declare class PositionManager {
     private readonly client?;
-    private readonly config;
-    private readonly assets;
-    private readonly instrumentMetadata;
+    private config;
+    private assets;
+    private instrumentMetadata;
     private readonly positionsByKey;
     private readonly closed;
     constructor(client?: SignalEventSource, config?: PositionManagerConfig);
     assetManager(): AssetManager;
     instrumentManager(): InstrumentManager;
+    updateConfig(config: PositionManagerConfig): void;
     run(signal?: AbortSignal): AsyncIterableIterator<Order>;
     addPosition(position: Position): void;
     updatePosition(position: Position): void;

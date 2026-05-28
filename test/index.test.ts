@@ -391,6 +391,53 @@ describe("PositionManager", () => {
     expect(high).toBeCloseTo(5);
   });
 
+  it("updates config without clearing state or instrument metadata", () => {
+    const manager = new PositionManager(undefined, productionPositionManagerConfig({
+      maxMarginRatio: 1,
+      minExpectedEdge: 0,
+      minOrderDelta: 0,
+      rebalanceIntervalMs: 60 * 60 * 1000,
+      minLeverage: 5,
+      maxLeverage: 5
+    }));
+    manager.instrumentManager().updateInstrument({ venue: "okx", instrument: "BTC-USDT-SWAP" });
+    const [opening] = manager.handleSignal({
+      venue: "okx",
+      instrument: "BTC-USDT-SWAP",
+      side: "buy",
+      confidence: 1,
+      takeProfit: 0.02,
+      stopLoss: 0.004,
+      score: 1,
+      price: 100,
+      timestamp: new Date("2026-05-26T00:00:00Z")
+    });
+    expect(opening?.leverage).toBeCloseTo(5);
+
+    manager.updateConfig(productionPositionManagerConfig({
+      maxMarginRatio: 1,
+      minExpectedEdge: 0,
+      minOrderDelta: 0,
+      rebalanceIntervalMs: 60 * 60 * 1000,
+      minLeverage: 1,
+      maxLeverage: 1
+    }));
+    expect(manager.positions()).toHaveLength(1);
+    const [closing] = manager.handleSignal({
+      venue: "okx",
+      instrument: "BTC-USDT-SWAP",
+      side: "sell",
+      confidence: 1,
+      takeProfit: 0.02,
+      stopLoss: 0.004,
+      score: -1,
+      price: 99,
+      timestamp: new Date("2026-05-26T00:01:00Z")
+    });
+    expect(closing?.reduceOnly).toBe(true);
+    expect(closing?.leverage).toBeCloseTo(1);
+  });
+
   it("turns abstract sizing into rounded concrete orders", () => {
     const assets = new AssetManager();
     assets.updateAsset({ currency: "USDT", cash: 1000, available: 900, used: 100, equity: 1000 });

@@ -319,6 +319,19 @@ export class PositionManager {
     instrumentManager() {
         return this.instrumentMetadata;
     }
+    updateConfig(config) {
+        const next = normalizeConfig({
+            ...config,
+            instruments: config.instruments ?? { ...this.config.instruments },
+            assetManager: config.assetManager ?? this.assets,
+            instrumentManager: config.instrumentManager ?? this.instrumentMetadata,
+            initialState: undefined,
+            persist: config.persist ?? this.config.persist
+        });
+        this.config = next;
+        this.assets = next.assetManager;
+        this.instrumentMetadata = next.instrumentManager;
+    }
     async *run(signal) {
         if (!this.client) {
             throw new Error("signals-client: PositionManager has no SignalsClient");
