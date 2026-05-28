@@ -489,7 +489,18 @@ export interface PositionManagerConfig {
   instruments?: Record<string, InstrumentConfig>;
   assetManager?: AssetManager;
   instrumentManager?: InstrumentManager;
+  initialState?: PositionManagerState;
+  persist?: PositionManagerPersist;
 }
+
+export type PositionManagerPersist = (state: PositionManagerState) => void;
+
+export interface PositionManagerState {
+  positions: Position[];
+  closedTrades?: ClosedTrade[];
+}
+
+type NormalizedPositionManagerConfig = Required<Omit<PositionManagerConfig, "initialState" | "persist">> & Pick<PositionManagerConfig, "initialState" | "persist">;
 
 export interface Position {
   venue: string;
@@ -636,7 +647,7 @@ export function productionPositionManagerConfig(overrides: PositionManagerConfig
 
 export class PositionManager {
   private readonly client?: SignalEventSource;
-  private readonly config: Required<PositionManagerConfig>;
+  private readonly config: NormalizedPositionManagerConfig;
   private readonly assets: AssetManager;
   private readonly instrumentMetadata: InstrumentManager;
   private readonly positionsByKey = new Map<string, Position>();
@@ -647,6 +658,7 @@ export class PositionManager {
     this.config = normalizeConfig(config);
     this.assets = this.config.assetManager;
     this.instrumentMetadata = this.config.instrumentManager;
+    this.hydrateState(this.config.initialState);
   }
 
   assetManager(): AssetManager {
@@ -671,6 +683,7 @@ export class PositionManager {
   addPosition(position: Position): void {
     const key = positionKey(position.venue, position.instrument);
     this.positionsByKey.set(key, { ...position, leverage: position.leverage ?? this.minLeverage(key) });
+    this.persist();
   }
 
   updatePosition(position: Position): void {
@@ -681,8 +694,10 @@ export class PositionManager {
     this.positionsByKey.clear();
     for (const position of positions) {
       if (!position.venue || !position.instrument || Math.abs(position.size) <= 1e-9) continue;
-      this.addPosition(position);
+      const key = positionKey(position.venue, position.instrument);
+      this.positionsByKey.set(key, { ...position, leverage: position.leverage ?? this.minLeverage(key) });
     }
+    this.persist();
   }
 
   closePosition(venue: string, instrument: string): Order[] {
@@ -694,6 +709,7 @@ export class PositionManager {
     const order = this.orderForDelta(key, position, delta, 0, undefined, "closing", now, position.confidence);
     if (!this.orderMeetsInstrumentMinimum(order)) return [];
     this.applyDelta(key, position, order.sizeDelta, position.lastPrice ?? position.entryPrice, this.takerFeeRate(key), now, "closing");
+    this.persist();
     return [order];
   }
 
@@ -703,6 +719,13 @@ export class PositionManager {
 
   closedTrades(): ClosedTrade[] {
     return this.closed.map((trade) => ({ ...trade }));
+  }
+
+  state(): PositionManagerState {
+    return {
+      positions: this.positions(),
+      closedTrades: this.closedTrades()
+    };
   }
 
   stats(): PositionStats {
@@ -803,15 +826,22 @@ export class PositionManager {
     position.lastPrice = price;
     updateExcursion(position);
     const reason = exitReason(position, price);
-    if (!reason) return [];
+    if (!reason) {
+      this.persist();
+      return [];
+    }
     const feeRate = reason === "take_profit" ? this.makerFeeRate(key) : this.takerFeeRate(key);
     const delta = -position.size;
     const order = this.orderForDelta(key, position, delta, 0, undefined, reason, timestamp, position.confidence);
     order.feeRate = feeRate;
     order.estimatedFee = feeValueForNotional(order.notional, feeRate);
     order.estimatedFeeValue = order.notional * feeRate;
-    if (!this.orderMeetsInstrumentMinimum(order)) return [];
+    if (!this.orderMeetsInstrumentMinimum(order)) {
+      this.persist();
+      return [];
+    }
     this.applyDelta(key, position, order.sizeDelta, price, feeRate, timestamp, reason);
+    this.persist();
     return [order];
   }
 
@@ -888,7 +918,7 @@ export class PositionManager {
     }
     position.leverage = this.selectLeverage(key, targetConfidence, edge, signal.score);
 
-    return this.rebalance(now, { [key]: targetSign }, {
+    const orders = this.rebalance(now, { [key]: targetSign }, {
       [key]: {
         confidence: targetConfidence,
         score: signal.score,
@@ -900,6 +930,23 @@ export class PositionManager {
         trailingStopMinProfit: trailing.minProfit
       }
     });
+    this.persist();
+    return orders;
+  }
+
+  private hydrateState(state?: PositionManagerState): void {
+    if (!state) return;
+    this.positionsByKey.clear();
+    for (const position of state.positions ?? []) {
+      if (!position.venue || !position.instrument || Math.abs(position.size) <= 1e-9) continue;
+      const key = positionKey(position.venue, position.instrument);
+      this.positionsByKey.set(key, { ...position, leverage: position.leverage ?? this.minLeverage(key) });
+    }
+    this.closed.splice(0, this.closed.length, ...((state.closedTrades ?? []).map((trade) => ({ ...trade }))));
+  }
+
+  private persist(): void {
+    this.config.persist?.(this.state());
   }
 
   private rebalance(now: Date, sideOverrides: Record<string, number>, contexts: Record<string, SignalContext>): Order[] {
@@ -1464,7 +1511,7 @@ function websocketUrlFromBase(baseUrl?: string): string | undefined {
   return url.toString();
 }
 
-function normalizeConfig(config: PositionManagerConfig): Required<PositionManagerConfig> {
+function normalizeConfig(config: PositionManagerConfig): NormalizedPositionManagerConfig {
   let maxMarginRatio = config.maxMarginRatio ?? 0;
   if (maxMarginRatio <= 0) {
     const legacy = config.positionSize ?? productionDefaults.positionSize;
@@ -1485,7 +1532,9 @@ function normalizeConfig(config: PositionManagerConfig): Required<PositionManage
     executableMarginBuffer: Math.min(Math.max(config.executableMarginBuffer ?? productionDefaults.executableMarginBuffer, 0), 0.05),
     instruments: config.instruments ?? {},
     assetManager: config.assetManager ?? new AssetManager(),
-    instrumentManager: config.instrumentManager ?? new InstrumentManager()
+    instrumentManager: config.instrumentManager ?? new InstrumentManager(),
+    initialState: config.initialState,
+    persist: config.persist
   };
 }
 

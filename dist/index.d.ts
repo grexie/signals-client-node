@@ -183,6 +183,13 @@ export interface PositionManagerConfig {
     instruments?: Record<string, InstrumentConfig>;
     assetManager?: AssetManager;
     instrumentManager?: InstrumentManager;
+    initialState?: PositionManagerState;
+    persist?: PositionManagerPersist;
+}
+export type PositionManagerPersist = (state: PositionManagerState) => void;
+export interface PositionManagerState {
+    positions: Position[];
+    closedTrades?: ClosedTrade[];
 }
 export interface Position {
     venue: string;
@@ -314,10 +321,13 @@ export declare class PositionManager {
     closePosition(venue: string, instrument: string): Order[];
     positions(): Position[];
     closedTrades(): ClosedTrade[];
+    state(): PositionManagerState;
     stats(): PositionStats;
     updatePrice(venue: string, instrument: string, price: number, timestamp?: Date): Order[];
     handleEvent(event: SignalsEvent): Order[];
     handleSignal(signal: Signal): Order[];
+    private hydrateState;
+    private persist;
     private rebalance;
     private allocateTargetSizes;
     private materializeRebalanceOrders;

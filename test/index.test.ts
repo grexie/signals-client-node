@@ -234,6 +234,40 @@ describe("PositionManager", () => {
     expect(trade?.realizedPnl ?? 0).toBeGreaterThan(0);
   });
 
+  it("persists and hydrates trailing stop state", () => {
+    const snapshots: ReturnType<PositionManager["state"]>[] = [];
+    const manager = new PositionManager(undefined, productionPositionManagerConfig({
+      maxMarginRatio: 0.1,
+      minExpectedEdge: 0,
+      minOrderDelta: 0,
+      persist: (state) => snapshots.push(state)
+    }));
+    manager.instrumentManager().updateInstrument({ venue: "okx", instrument: "BTC-USDT-SWAP" });
+    manager.handleSignal({
+      venue: "okx",
+      instrument: "BTC-USDT-SWAP",
+      side: "buy",
+      confidence: 0.8,
+      takeProfit: 0.5,
+      stopLoss: 0.2,
+      price: 100,
+      trailingStopActivation: 0.02,
+      trailingStopDistance: 0.01,
+      trailingStopMinProfit: 0.001
+    });
+    manager.updatePrice("okx", "BTC-USDT-SWAP", 104);
+    const latest = snapshots.at(-1);
+    expect(latest?.positions).toHaveLength(1);
+    expect(latest?.positions[0]?.trailingStopActivation).toBeCloseTo(0.02);
+    expect(latest?.positions[0]?.mfe ?? 0).toBeGreaterThan(0.039);
+
+    const rehydrated = new PositionManager(undefined, productionPositionManagerConfig({
+      initialState: latest
+    }));
+    expect(rehydrated.positions()).toHaveLength(1);
+    expect(rehydrated.positions()[0]?.mfe).toBe(latest?.positions[0]?.mfe);
+  });
+
   it("quantizes emitted target size to executable lots", () => {
     const assets = new AssetManager();
     assets.updateAsset({ currency: "USDT", equity: 1000, available: 1000 });

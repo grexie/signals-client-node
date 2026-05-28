@@ -311,6 +311,7 @@ export class PositionManager {
         this.config = normalizeConfig(config);
         this.assets = this.config.assetManager;
         this.instrumentMetadata = this.config.instrumentManager;
+        this.hydrateState(this.config.initialState);
     }
     assetManager() {
         return this.assets;
@@ -331,6 +332,7 @@ export class PositionManager {
     addPosition(position) {
         const key = positionKey(position.venue, position.instrument);
         this.positionsByKey.set(key, { ...position, leverage: position.leverage ?? this.minLeverage(key) });
+        this.persist();
     }
     updatePosition(position) {
         this.addPosition(position);
@@ -340,8 +342,10 @@ export class PositionManager {
         for (const position of positions) {
             if (!position.venue || !position.instrument || Math.abs(position.size) <= 1e-9)
                 continue;
-            this.addPosition(position);
+            const key = positionKey(position.venue, position.instrument);
+            this.positionsByKey.set(key, { ...position, leverage: position.leverage ?? this.minLeverage(key) });
         }
+        this.persist();
     }
     closePosition(venue, instrument) {
         const key = positionKey(venue, instrument);
@@ -354,6 +358,7 @@ export class PositionManager {
         if (!this.orderMeetsInstrumentMinimum(order))
             return [];
         this.applyDelta(key, position, order.sizeDelta, position.lastPrice ?? position.entryPrice, this.takerFeeRate(key), now, "closing");
+        this.persist();
         return [order];
     }
     positions() {
@@ -361,6 +366,12 @@ export class PositionManager {
     }
     closedTrades() {
         return this.closed.map((trade) => ({ ...trade }));
+    }
+    state() {
+        return {
+            positions: this.positions(),
+            closedTrades: this.closedTrades()
+        };
     }
     stats() {
         const stats = {
@@ -462,17 +473,22 @@ export class PositionManager {
         position.lastPrice = price;
         updateExcursion(position);
         const reason = exitReason(position, price);
-        if (!reason)
+        if (!reason) {
+            this.persist();
             return [];
+        }
         const feeRate = reason === "take_profit" ? this.makerFeeRate(key) : this.takerFeeRate(key);
         const delta = -position.size;
         const order = this.orderForDelta(key, position, delta, 0, undefined, reason, timestamp, position.confidence);
         order.feeRate = feeRate;
         order.estimatedFee = feeValueForNotional(order.notional, feeRate);
         order.estimatedFeeValue = order.notional * feeRate;
-        if (!this.orderMeetsInstrumentMinimum(order))
+        if (!this.orderMeetsInstrumentMinimum(order)) {
+            this.persist();
             return [];
+        }
         this.applyDelta(key, position, order.sizeDelta, price, feeRate, timestamp, reason);
+        this.persist();
         return [order];
     }
     handleEvent(event) {
@@ -553,7 +569,7 @@ export class PositionManager {
             position.trailingStopMinProfit = trailing.minProfit;
         }
         position.leverage = this.selectLeverage(key, targetConfidence, edge, signal.score);
-        return this.rebalance(now, { [key]: targetSign }, {
+        const orders = this.rebalance(now, { [key]: targetSign }, {
             [key]: {
                 confidence: targetConfidence,
                 score: signal.score,
@@ -565,6 +581,23 @@ export class PositionManager {
                 trailingStopMinProfit: trailing.minProfit
             }
         });
+        this.persist();
+        return orders;
+    }
+    hydrateState(state) {
+        if (!state)
+            return;
+        this.positionsByKey.clear();
+        for (const position of state.positions ?? []) {
+            if (!position.venue || !position.instrument || Math.abs(position.size) <= 1e-9)
+                continue;
+            const key = positionKey(position.venue, position.instrument);
+            this.positionsByKey.set(key, { ...position, leverage: position.leverage ?? this.minLeverage(key) });
+        }
+        this.closed.splice(0, this.closed.length, ...((state.closedTrades ?? []).map((trade) => ({ ...trade }))));
+    }
+    persist() {
+        this.config.persist?.(this.state());
     }
     rebalance(now, sideOverrides, contexts) {
         const portfolioBudget = this.maxPortfolioMarginBudget();
@@ -1149,7 +1182,9 @@ function normalizeConfig(config) {
         executableMarginBuffer: Math.min(Math.max(config.executableMarginBuffer ?? productionDefaults.executableMarginBuffer, 0), 0.05),
         instruments: config.instruments ?? {},
         assetManager: config.assetManager ?? new AssetManager(),
-        instrumentManager: config.instrumentManager ?? new InstrumentManager()
+        instrumentManager: config.instrumentManager ?? new InstrumentManager(),
+        initialState: config.initialState,
+        persist: config.persist
     };
 }
 function feeAdjustedExpectedEdge(signal, takerFeeRate) {
