@@ -176,6 +176,8 @@ export interface PositionManagerConfig {
     minOrderDelta?: number;
     minPositionSizeRatio?: number;
     rebalanceIntervalMs?: number;
+    flipFlopWindowMs?: number;
+    signalFlipMinConfidence?: number;
     makerFeeRate?: number;
     takerFeeRate?: number;
     minLeverage?: number;
@@ -349,6 +351,7 @@ export declare class PositionManager {
     private capExecutableDeltaWithBufferedCost;
     private capContinuousOpeningDeltaToBudget;
     private shouldSkipRebalanceDelta;
+    private shouldSuppressFlipFlop;
     private orderForDelta;
     private applyDelta;
     private effectiveMinOrderDelta;

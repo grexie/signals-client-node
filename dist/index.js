@@ -285,6 +285,8 @@ const productionDefaults = {
     minOrderDelta: 0.2,
     minPositionSizeRatio: 0.01,
     rebalanceIntervalMs: 6 * 60 * 60 * 1000,
+    flipFlopWindowMs: 30 * 60 * 1000,
+    signalFlipMinConfidence: 0,
     minLeverage: 1,
     maxLeverage: 1,
     availableMarginBuffer: 0.1,
@@ -559,6 +561,8 @@ export class PositionManager {
         else {
             const isFlip = sign(position.size) !== 0 && sign(position.size) !== targetSign;
             const belowMinimum = !this.meetsMinimumPositionSize(this.positionMargin(key, position));
+            if (isFlip && this.shouldSuppressFlipFlop(position, signal, now))
+                return [];
             if (!isFlip && !belowMinimum && this.config.rebalanceIntervalMs > 0 && position.lastSignalAt) {
                 if (now.getTime() < position.lastSignalAt.getTime() + this.config.rebalanceIntervalMs)
                     return [];
@@ -999,6 +1003,15 @@ export class PositionManager {
         }
         return false;
     }
+    shouldSuppressFlipFlop(position, signal, now) {
+        if (signal.managePositionsOnly)
+            return false;
+        if (!position.lastSignalAt || this.config.flipFlopWindowMs <= 0)
+            return false;
+        if (now.getTime() >= position.lastSignalAt.getTime() + this.config.flipFlopWindowMs)
+            return false;
+        return this.config.signalFlipMinConfidence <= 0 || signal.confidence + 1e-12 < this.config.signalFlipMinConfidence;
+    }
     orderForDelta(key, position, delta, edge, score, reason, now, confidence) {
         const feeRate = this.takerFeeRate(key);
         const leverage = this.selectLeverage(key, confidence, edge, score);
@@ -1203,6 +1216,8 @@ function normalizeConfig(config) {
         minOrderDelta: Math.min(Math.max(config.minOrderDelta ?? productionDefaults.minOrderDelta, 0), 1),
         minPositionSizeRatio: Math.min(Math.max(config.minPositionSizeRatio ?? productionDefaults.minPositionSizeRatio, 0), 1),
         rebalanceIntervalMs: Math.max(config.rebalanceIntervalMs ?? productionDefaults.rebalanceIntervalMs, 0),
+        flipFlopWindowMs: Math.max(config.flipFlopWindowMs ?? productionDefaults.flipFlopWindowMs, 0),
+        signalFlipMinConfidence: Math.min(Math.max(config.signalFlipMinConfidence ?? productionDefaults.signalFlipMinConfidence, 0), 1),
         makerFeeRate: Math.max(config.makerFeeRate ?? productionDefaults.makerFeeRate, 0),
         takerFeeRate: Math.max(config.takerFeeRate ?? productionDefaults.takerFeeRate, 0),
         minLeverage: Math.max(config.minLeverage ?? productionDefaults.minLeverage, 0),

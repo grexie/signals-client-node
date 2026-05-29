@@ -130,6 +130,7 @@ describe("PositionManager", () => {
       minExpectedEdge: 0,
       minOrderDelta: 0.2,
       rebalanceIntervalMs: 60 * 60 * 1000,
+      flipFlopWindowMs: 0,
       minLeverage: 1,
       maxLeverage: 5
     }));
@@ -181,6 +182,92 @@ describe("PositionManager", () => {
     expect(openShort).toHaveLength(1);
     expect(openShort[0]?.side).toBe("sell");
     expect(openShort[0]?.reason).toBe("opening");
+  });
+
+  it("suppresses flip-flops by default inside the configured window", () => {
+    const manager = new PositionManager(undefined, productionPositionManagerConfig({
+      maxMarginRatio: 0.1,
+      minExpectedEdge: 0,
+      minOrderDelta: 0,
+      rebalanceIntervalMs: 60 * 60 * 1000
+    }));
+    manager.instrumentManager().updateInstrument({ venue: "okx", instrument: "BTC-USDT-SWAP" });
+    expect(manager.handleSignal({
+      venue: "okx",
+      instrument: "BTC-USDT-SWAP",
+      side: "buy",
+      confidence: 0.8,
+      takeProfit: 0.02,
+      stopLoss: 0.004,
+      price: 100,
+      timestamp: "2026-05-26T00:00:00Z"
+    })).toHaveLength(1);
+    expect(manager.handleSignal({
+      venue: "okx",
+      instrument: "BTC-USDT-SWAP",
+      side: "sell",
+      confidence: 0.99,
+      takeProfit: 0.02,
+      stopLoss: 0.004,
+      price: 99.95,
+      timestamp: "2026-05-26T00:05:00Z"
+    })).toHaveLength(0);
+    const outsideWindow = manager.handleSignal({
+      venue: "okx",
+      instrument: "BTC-USDT-SWAP",
+      side: "sell",
+      confidence: 0.99,
+      takeProfit: 0.02,
+      stopLoss: 0.004,
+      price: 99.95,
+      timestamp: "2026-05-26T00:31:00Z"
+    });
+    expect(outsideWindow).toHaveLength(1);
+    expect(outsideWindow[0]?.reason).toBe("flip");
+  });
+
+  it("allows an explicit high-confidence flip threshold inside the configured window", () => {
+    const manager = new PositionManager(undefined, productionPositionManagerConfig({
+      maxMarginRatio: 0.1,
+      minExpectedEdge: 0,
+      minOrderDelta: 0,
+      rebalanceIntervalMs: 60 * 60 * 1000,
+      flipFlopWindowMs: 30 * 60 * 1000,
+      signalFlipMinConfidence: 0.72
+    }));
+    manager.instrumentManager().updateInstrument({ venue: "okx", instrument: "BTC-USDT-SWAP" });
+    expect(manager.handleSignal({
+      venue: "okx",
+      instrument: "BTC-USDT-SWAP",
+      side: "buy",
+      confidence: 0.8,
+      takeProfit: 0.02,
+      stopLoss: 0.004,
+      price: 100,
+      timestamp: "2026-05-26T00:00:00Z"
+    })).toHaveLength(1);
+    expect(manager.handleSignal({
+      venue: "okx",
+      instrument: "BTC-USDT-SWAP",
+      side: "sell",
+      confidence: 0.70,
+      takeProfit: 0.02,
+      stopLoss: 0.004,
+      price: 99.95,
+      timestamp: "2026-05-26T00:05:00Z"
+    })).toHaveLength(0);
+    const flip = manager.handleSignal({
+      venue: "okx",
+      instrument: "BTC-USDT-SWAP",
+      side: "sell",
+      confidence: 0.72,
+      takeProfit: 0.02,
+      stopLoss: 0.004,
+      price: 99.95,
+      timestamp: "2026-05-26T00:06:00Z"
+    });
+    expect(flip).toHaveLength(1);
+    expect(flip[0]?.reason).toBe("flip");
   });
 
   it("uses confidence as allocation weight", () => {
@@ -477,6 +564,7 @@ describe("PositionManager", () => {
       minExpectedEdge: 0,
       minOrderDelta: 0,
       rebalanceIntervalMs: 60 * 60 * 1000,
+      flipFlopWindowMs: 0,
       minLeverage: 5,
       maxLeverage: 5
     }));
@@ -499,6 +587,7 @@ describe("PositionManager", () => {
       minExpectedEdge: 0,
       minOrderDelta: 0,
       rebalanceIntervalMs: 60 * 60 * 1000,
+      flipFlopWindowMs: 0,
       minLeverage: 1,
       maxLeverage: 1
     }));
