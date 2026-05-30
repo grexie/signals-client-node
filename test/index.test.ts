@@ -226,6 +226,26 @@ describe("PositionManager", () => {
     expect(outsideWindow[0]?.reason).toBe("flip");
   });
 
+  it("ignores signals after an instrument is removed", () => {
+    const manager = new PositionManager(undefined, productionPositionManagerConfig());
+    manager.assetManager().updateAsset({ currency: "USDT", available: 1000, equity: 1000 });
+    manager.instrumentManager().updateInstrument({ venue: "okx", instrument: "BTC-USDT-SWAP" });
+    manager.instrumentManager().removeInstrument("okx", "BTC-USDT-SWAP");
+    const orders = manager.handleSignal({
+      venue: "okx",
+      instrument: "BTC-USDT-SWAP",
+      side: "buy",
+      confidence: 1,
+      takeProfit: 0.03,
+      stopLoss: 0.01,
+      score: 1,
+      price: 100,
+      timestamp: "2026-05-30T12:00:00Z"
+    });
+    expect(orders).toHaveLength(0);
+    expect(manager.instrumentManager().instrument("okx", "BTC-USDT-SWAP")).toBeUndefined();
+  });
+
   it("allows an explicit high-confidence flip threshold inside the configured window", () => {
     const manager = new PositionManager(undefined, productionPositionManagerConfig({
       maxMarginRatio: 0.1,

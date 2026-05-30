@@ -463,6 +463,11 @@ export class InstrumentManager {
     });
   }
 
+  removeInstrument(venue: string, instrument: string): void {
+    if (!venue || !instrument) return;
+    this.instrumentsByKey.delete(positionKey(venue, instrument));
+  }
+
   instrument(venue: string, instrument: string): Required<InstrumentMetadata> | undefined {
     return this.instrumentsByKey.get(positionKey(venue, instrument));
   }
