@@ -42,6 +42,40 @@ export class SignalsClient extends EventEmitter {
     subscribe(venue, instrument) {
         this.send({ type: "subscribe", venue, instrument });
     }
+    subscribeBasket(request) {
+        this.send({ type: "subscribe", ...request });
+    }
+    updateAsset(subscriptionId, asset) {
+        this.send({ type: "update-asset", subscriptionId, ...asset });
+    }
+    updatePosition(subscriptionId, position) {
+        this.send({
+            type: "update-position",
+            subscriptionId,
+            venue: position.venue,
+            instrument: position.instrument,
+            side: positionSide(position),
+            status: position.status,
+            size: Math.abs(position.size),
+            entryPrice: position.entryPrice,
+            markPrice: position.lastPrice,
+            leverage: position.leverage,
+            takeProfitPrice: position.takeProfitPrice,
+            stopLossPrice: position.stopLossPrice
+        });
+    }
+    addInstrument(subscriptionId, instrument) {
+        this.send({ type: "add-instrument", subscriptionId, instrument });
+    }
+    removeInstrument(subscriptionId, instrument) {
+        this.send({ type: "remove-instrument", subscriptionId, instrument });
+    }
+    updateConfig(subscriptionId, config) {
+        this.send({ type: "update-config", subscriptionId, ...config });
+    }
+    scheduleWithdrawal(subscriptionId, withdrawal) {
+        this.send({ type: "schedule-withdrawal", subscriptionId, ...withdrawal });
+    }
     unsubscribe(subscriptionId) {
         this.send({ type: "unsubscribe", subscriptionId });
     }
@@ -225,6 +259,49 @@ export function parseEvent(raw) {
                 replayedAt: msg.replayedAt
             };
         }
+        case "create-market-order":
+            return {
+                type: "create-market-order",
+                subscriptionId: Number(msg.subscriptionId ?? 0),
+                intentId: msg.intentId,
+                action: msg.action,
+                venue: msg.venue,
+                instrument: msg.instrument ?? "",
+                side: msg.side ?? "buy",
+                orderType: msg.orderType,
+                contractSize: msg.contractSize,
+                leverage: msg.leverage,
+                reduceOnly: msg.reduceOnly,
+                takeProfitPrice: msg.takeProfitPrice,
+                stopLossPrice: msg.stopLossPrice,
+                takeProfit: msg.takeProfit,
+                stopLoss: msg.stopLoss,
+                timestamp: msg.timestamp
+            };
+        case "update-tpsl":
+            return {
+                type: "update-tpsl",
+                subscriptionId: Number(msg.subscriptionId ?? 0),
+                intentId: msg.intentId,
+                venue: msg.venue,
+                instrument: msg.instrument ?? "",
+                side: msg.side ?? "buy",
+                takeProfitPrice: msg.takeProfitPrice,
+                stopLossPrice: msg.stopLossPrice,
+                takeProfit: msg.takeProfit,
+                stopLoss: msg.stopLoss,
+                timestamp: msg.timestamp
+            };
+        case "withdraw":
+            return {
+                type: "withdraw",
+                subscriptionId: Number(msg.subscriptionId ?? 0),
+                intentId: msg.intentId,
+                venue: msg.venue,
+                currency: msg.currency ?? "",
+                amount: msg.amount ?? 0,
+                timestamp: msg.timestamp
+            };
         case "error":
             return { type: "error", code: msg.code, message: msg.message };
         default:
@@ -237,11 +314,13 @@ export class AssetManager {
         if (!snapshot.currency)
             return;
         this.assetsByCurrency.set(snapshot.currency, {
+            venue: snapshot.venue ?? "",
             currency: snapshot.currency,
             cash: snapshot.cash ?? 0,
             available: snapshot.available ?? 0,
             used: snapshot.used ?? 0,
             equity: snapshot.equity ?? 0,
+            maxUsage: clamp01(positiveOr(snapshot.maxUsage, 1)),
             updatedAt: snapshot.updatedAt ?? new Date()
         });
     }
@@ -268,6 +347,11 @@ export class InstrumentManager {
             contractMultiplier: metadata.contractMultiplier ?? 0,
             maxLeverage: metadata.maxLeverage ?? 0
         });
+    }
+    removeInstrument(venue, instrument) {
+        if (!venue || !instrument)
+            return;
+        this.instrumentsByKey.delete(positionKey(venue, instrument));
     }
     instrument(venue, instrument) {
         return this.instrumentsByKey.get(positionKey(venue, instrument));
@@ -840,7 +924,7 @@ export class PositionManager {
             return portfolioBudget;
         if (asset.available <= 0)
             return 0;
-        let budget = Math.max(0, asset.available);
+        let budget = Math.max(0, asset.available) * clamp01(positiveOr(asset.maxUsage, 1));
         if (this.config.availableMarginBuffer > 0)
             budget *= 1 - this.config.availableMarginBuffer;
         return Math.min(budget, portfolioBudget);
@@ -1328,6 +1412,8 @@ function move(position) {
     return (position.lastPrice - position.entryPrice) / position.entryPrice;
 }
 function takeProfitPrice(position) {
+    if (position.takeProfitPrice && position.takeProfitPrice > 0)
+        return position.takeProfitPrice;
     if (!position.entryPrice || !position.takeProfit)
         return undefined;
     return position.size < 0
@@ -1335,6 +1421,8 @@ function takeProfitPrice(position) {
         : position.entryPrice * (1 + position.takeProfit);
 }
 function stopLossPrice(position) {
+    if (position.stopLossPrice && position.stopLossPrice > 0)
+        return position.stopLossPrice;
     if (!position.entryPrice || !position.stopLoss)
         return undefined;
     return position.size < 0

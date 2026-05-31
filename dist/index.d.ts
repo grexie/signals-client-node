@@ -88,12 +88,52 @@ export interface SignalEvent {
     replay?: boolean;
     replayedAt?: string;
 }
+export interface CreateMarketOrderEvent {
+    type: "create-market-order";
+    subscriptionId: number;
+    intentId?: string;
+    action?: string;
+    venue?: string;
+    instrument: string;
+    side: Side;
+    orderType?: string;
+    contractSize?: number;
+    leverage?: number;
+    reduceOnly?: boolean;
+    takeProfitPrice?: number;
+    stopLossPrice?: number;
+    takeProfit?: number;
+    stopLoss?: number;
+    timestamp?: string;
+}
+export interface UpdateTPSLEvent {
+    type: "update-tpsl";
+    subscriptionId: number;
+    intentId?: string;
+    venue?: string;
+    instrument: string;
+    side: Side;
+    takeProfitPrice?: number;
+    stopLossPrice?: number;
+    takeProfit?: number;
+    stopLoss?: number;
+    timestamp?: string;
+}
+export interface WithdrawEvent {
+    type: "withdraw";
+    subscriptionId: number;
+    intentId?: string;
+    venue?: string;
+    currency: string;
+    amount: number;
+    timestamp?: string;
+}
 export interface ErrorEvent {
     type: "error";
     code?: string;
     message?: string;
 }
-export type SignalsEvent = ReadyEvent | SubscribedEvent | UnsubscribedEvent | InfoEvent | SignalEvent | ErrorEvent;
+export type SignalsEvent = ReadyEvent | SubscribedEvent | UnsubscribedEvent | InfoEvent | SignalEvent | CreateMarketOrderEvent | UpdateTPSLEvent | WithdrawEvent | ErrorEvent;
 export interface SignalEventSource {
     events(signal?: AbortSignal): AsyncIterable<SignalsEvent>;
 }
@@ -102,6 +142,33 @@ export interface SignalsClientOptions {
     baseUrl?: string;
     headers?: Record<string, string>;
     WebSocketCtor?: typeof WebSocket;
+}
+export interface RiskConfig {
+    maxMarginRatio?: number;
+    maxConcurrentPositions?: number;
+    maxDrawdown?: number;
+    switchBuffer?: number;
+    minLeverage?: number;
+    maxLeverage?: number;
+    profitWithdrawRatio?: number;
+}
+export interface RuntimeConfig {
+    profitWithdrawRatio?: number;
+}
+export interface SubscribeRequest {
+    venue: string;
+    instruments: string[];
+    mode?: string;
+    risk?: RiskConfig;
+    profitWithdrawRatio?: number;
+    assets?: AssetSnapshot[];
+    positions?: Position[];
+}
+export interface WithdrawalRequest {
+    venue?: string;
+    currency: string;
+    amount: number;
+    reason?: string;
 }
 export declare class SignalsClient extends EventEmitter {
     private readonly token;
@@ -114,6 +181,13 @@ export declare class SignalsClient extends EventEmitter {
     connect(): Promise<void>;
     close(): void;
     subscribe(venue: string, instrument: string): void;
+    subscribeBasket(request: SubscribeRequest): void;
+    updateAsset(subscriptionId: number, asset: AssetSnapshot): void;
+    updatePosition(subscriptionId: number, position: Position): void;
+    addInstrument(subscriptionId: number, instrument: string): void;
+    removeInstrument(subscriptionId: number, instrument: string): void;
+    updateConfig(subscriptionId: number, config: RuntimeConfig): void;
+    scheduleWithdrawal(subscriptionId: number, withdrawal: WithdrawalRequest): void;
     unsubscribe(subscriptionId: number): void;
     unsubscribeInstrument(venue: string, instrument: string): void;
     receive(signal?: AbortSignal): Promise<SignalsEvent>;
@@ -138,11 +212,13 @@ export interface InstrumentConfig {
     managePositionsOnly?: boolean;
 }
 export interface AssetSnapshot {
+    venue?: string;
     currency: string;
     cash?: number;
     available?: number;
     used?: number;
     equity?: number;
+    maxUsage?: number;
     updatedAt?: Date;
 }
 export declare class AssetManager {
@@ -165,6 +241,7 @@ export interface InstrumentMetadata {
 export declare class InstrumentManager {
     private readonly instrumentsByKey;
     updateInstrument(metadata: InstrumentMetadata): void;
+    removeInstrument(venue: string, instrument: string): void;
     instrument(venue: string, instrument: string): Required<InstrumentMetadata> | undefined;
     instruments(): Required<InstrumentMetadata>[];
 }
@@ -198,12 +275,15 @@ export interface PositionManagerState {
 export interface Position {
     venue: string;
     instrument: string;
+    status?: "open" | "closed";
     size: number;
     confidence: number;
     entryPrice?: number;
     lastPrice?: number;
     takeProfit?: number;
     stopLoss?: number;
+    takeProfitPrice?: number;
+    stopLossPrice?: number;
     trailingStopActivation?: number;
     trailingStopDistance?: number;
     trailingStopMinProfit?: number;

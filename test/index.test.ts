@@ -47,6 +47,40 @@ describe("parseEvent", () => {
       message: "no access"
     }))).toMatchObject({ type: "error", code: "forbidden" });
   });
+
+  it("parses order-router execution events", () => {
+    expect(parseEvent(JSON.stringify({
+      type: "create-market-order",
+      subscriptionId: 12,
+      intentId: "intent_1",
+      venue: "okx",
+      instrument: "BTC-USDT-SWAP",
+      side: "buy",
+      orderType: "market",
+      contractSize: 3,
+      leverage: 2
+    }))).toMatchObject({ type: "create-market-order", subscriptionId: 12, intentId: "intent_1", contractSize: 3 });
+    expect(parseEvent(JSON.stringify({
+      type: "update-tpsl",
+      subscriptionId: 12,
+      intentId: "intent_2",
+      venue: "okx",
+      instrument: "BTC-USDT-SWAP",
+      side: "buy",
+      takeProfitPrice: 72100,
+      stopLossPrice: 70050,
+      takeProfit: 0.03,
+      stopLoss: 0.0007
+    }))).toMatchObject({ type: "update-tpsl", subscriptionId: 12, takeProfitPrice: 72100, stopLossPrice: 70050 });
+    expect(parseEvent(JSON.stringify({
+      type: "withdraw",
+      subscriptionId: 12,
+      intentId: "withdraw_1",
+      venue: "okx",
+      currency: "USDT",
+      amount: 42
+    }))).toMatchObject({ type: "withdraw", subscriptionId: 12, currency: "USDT", amount: 42 });
+  });
 });
 
 function orderBudgetCost(order: Order | undefined): number {

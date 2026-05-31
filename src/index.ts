@@ -97,6 +97,49 @@ export interface SignalEvent {
   replayedAt?: string;
 }
 
+export interface CreateMarketOrderEvent {
+  type: "create-market-order";
+  subscriptionId: number;
+  intentId?: string;
+  action?: string;
+  venue?: string;
+  instrument: string;
+  side: Side;
+  orderType?: string;
+  contractSize?: number;
+  leverage?: number;
+  reduceOnly?: boolean;
+  takeProfitPrice?: number;
+  stopLossPrice?: number;
+  takeProfit?: number;
+  stopLoss?: number;
+  timestamp?: string;
+}
+
+export interface UpdateTPSLEvent {
+  type: "update-tpsl";
+  subscriptionId: number;
+  intentId?: string;
+  venue?: string;
+  instrument: string;
+  side: Side;
+  takeProfitPrice?: number;
+  stopLossPrice?: number;
+  takeProfit?: number;
+  stopLoss?: number;
+  timestamp?: string;
+}
+
+export interface WithdrawEvent {
+  type: "withdraw";
+  subscriptionId: number;
+  intentId?: string;
+  venue?: string;
+  currency: string;
+  amount: number;
+  timestamp?: string;
+}
+
 export interface ErrorEvent {
   type: "error";
   code?: string;
@@ -109,6 +152,9 @@ export type SignalsEvent =
   | UnsubscribedEvent
   | InfoEvent
   | SignalEvent
+  | CreateMarketOrderEvent
+  | UpdateTPSLEvent
+  | WithdrawEvent
   | ErrorEvent;
 
 export interface SignalEventSource {
@@ -120,6 +166,37 @@ export interface SignalsClientOptions {
   baseUrl?: string;
   headers?: Record<string, string>;
   WebSocketCtor?: typeof WebSocket;
+}
+
+export interface RiskConfig {
+  maxMarginRatio?: number;
+  maxConcurrentPositions?: number;
+  maxDrawdown?: number;
+  switchBuffer?: number;
+  minLeverage?: number;
+  maxLeverage?: number;
+  profitWithdrawRatio?: number;
+}
+
+export interface RuntimeConfig {
+  profitWithdrawRatio?: number;
+}
+
+export interface SubscribeRequest {
+  venue: string;
+  instruments: string[];
+  mode?: string;
+  risk?: RiskConfig;
+  profitWithdrawRatio?: number;
+  assets?: AssetSnapshot[];
+  positions?: Position[];
+}
+
+export interface WithdrawalRequest {
+  venue?: string;
+  currency: string;
+  amount: number;
+  reason?: string;
 }
 
 interface Waiter {
@@ -140,6 +217,19 @@ interface RawServerEvent {
   replay?: boolean;
   replayedAt?: string;
   signal?: Partial<Signal>;
+  intentId?: string;
+  action?: string;
+  side?: Side;
+  orderType?: string;
+  contractSize?: number;
+  leverage?: number;
+  reduceOnly?: boolean;
+  takeProfitPrice?: number;
+  stopLossPrice?: number;
+  takeProfit?: number;
+  stopLoss?: number;
+  currency?: string;
+  amount?: number;
 }
 
 const defaultWebSocketUrl = "wss://signals.grexie.com/ws";
@@ -188,6 +278,47 @@ export class SignalsClient extends EventEmitter {
 
   subscribe(venue: string, instrument: string): void {
     this.send({ type: "subscribe", venue, instrument });
+  }
+
+  subscribeBasket(request: SubscribeRequest): void {
+    this.send({ type: "subscribe", ...request });
+  }
+
+  updateAsset(subscriptionId: number, asset: AssetSnapshot): void {
+    this.send({ type: "update-asset", subscriptionId, ...asset });
+  }
+
+  updatePosition(subscriptionId: number, position: Position): void {
+    this.send({
+      type: "update-position",
+      subscriptionId,
+      venue: position.venue,
+      instrument: position.instrument,
+      side: positionSide(position),
+      status: position.status,
+      size: Math.abs(position.size),
+      entryPrice: position.entryPrice,
+      markPrice: position.lastPrice,
+      leverage: position.leverage,
+      takeProfitPrice: position.takeProfitPrice,
+      stopLossPrice: position.stopLossPrice
+    });
+  }
+
+  addInstrument(subscriptionId: number, instrument: string): void {
+    this.send({ type: "add-instrument", subscriptionId, instrument });
+  }
+
+  removeInstrument(subscriptionId: number, instrument: string): void {
+    this.send({ type: "remove-instrument", subscriptionId, instrument });
+  }
+
+  updateConfig(subscriptionId: number, config: RuntimeConfig): void {
+    this.send({ type: "update-config", subscriptionId, ...config });
+  }
+
+  scheduleWithdrawal(subscriptionId: number, withdrawal: WithdrawalRequest): void {
+    this.send({ type: "schedule-withdrawal", subscriptionId, ...withdrawal });
   }
 
   unsubscribe(subscriptionId: number): void {
@@ -382,6 +513,49 @@ export function parseEvent(raw: string): SignalsEvent {
         replayedAt: msg.replayedAt
       };
     }
+    case "create-market-order":
+      return {
+        type: "create-market-order",
+        subscriptionId: Number(msg.subscriptionId ?? 0),
+        intentId: msg.intentId,
+        action: msg.action,
+        venue: msg.venue,
+        instrument: msg.instrument ?? "",
+        side: msg.side ?? "buy",
+        orderType: msg.orderType,
+        contractSize: msg.contractSize,
+        leverage: msg.leverage,
+        reduceOnly: msg.reduceOnly,
+        takeProfitPrice: msg.takeProfitPrice,
+        stopLossPrice: msg.stopLossPrice,
+        takeProfit: msg.takeProfit,
+        stopLoss: msg.stopLoss,
+        timestamp: msg.timestamp
+      };
+    case "update-tpsl":
+      return {
+        type: "update-tpsl",
+        subscriptionId: Number(msg.subscriptionId ?? 0),
+        intentId: msg.intentId,
+        venue: msg.venue,
+        instrument: msg.instrument ?? "",
+        side: msg.side ?? "buy",
+        takeProfitPrice: msg.takeProfitPrice,
+        stopLossPrice: msg.stopLossPrice,
+        takeProfit: msg.takeProfit,
+        stopLoss: msg.stopLoss,
+        timestamp: msg.timestamp
+      };
+    case "withdraw":
+      return {
+        type: "withdraw",
+        subscriptionId: Number(msg.subscriptionId ?? 0),
+        intentId: msg.intentId,
+        venue: msg.venue,
+        currency: msg.currency ?? "",
+        amount: msg.amount ?? 0,
+        timestamp: msg.timestamp
+      };
     case "error":
       return { type: "error", code: msg.code, message: msg.message };
     default:
@@ -401,11 +575,13 @@ export interface InstrumentConfig {
 }
 
 export interface AssetSnapshot {
+  venue?: string;
   currency: string;
   cash?: number;
   available?: number;
   used?: number;
   equity?: number;
+  maxUsage?: number;
   updatedAt?: Date;
 }
 
@@ -415,11 +591,13 @@ export class AssetManager {
   updateAsset(snapshot: AssetSnapshot): void {
     if (!snapshot.currency) return;
     this.assetsByCurrency.set(snapshot.currency, {
+      venue: snapshot.venue ?? "",
       currency: snapshot.currency,
       cash: snapshot.cash ?? 0,
       available: snapshot.available ?? 0,
       used: snapshot.used ?? 0,
       equity: snapshot.equity ?? 0,
+      maxUsage: clamp01(positiveOr(snapshot.maxUsage, 1)),
       updatedAt: snapshot.updatedAt ?? new Date()
     });
   }
@@ -514,12 +692,15 @@ type NormalizedPositionManagerConfig = Required<Omit<PositionManagerConfig, "ini
 export interface Position {
   venue: string;
   instrument: string;
+  status?: "open" | "closed";
   size: number;
   confidence: number;
   entryPrice?: number;
   lastPrice?: number;
   takeProfit?: number;
   stopLoss?: number;
+  takeProfitPrice?: number;
+  stopLossPrice?: number;
   trailingStopActivation?: number;
   trailingStopDistance?: number;
   trailingStopMinProfit?: number;
@@ -1184,7 +1365,7 @@ export class PositionManager {
     const asset = this.assets.asset(currency);
     if (!asset) return portfolioBudget;
     if (asset.available <= 0) return 0;
-    let budget = Math.max(0, asset.available);
+    let budget = Math.max(0, asset.available) * clamp01(positiveOr(asset.maxUsage, 1));
     if (this.config.availableMarginBuffer > 0) budget *= 1 - this.config.availableMarginBuffer;
     return Math.min(budget, portfolioBudget);
   }
@@ -1690,6 +1871,7 @@ function move(position: Position): number {
 }
 
 function takeProfitPrice(position: Position): number | undefined {
+  if (position.takeProfitPrice && position.takeProfitPrice > 0) return position.takeProfitPrice;
   if (!position.entryPrice || !position.takeProfit) return undefined;
   return position.size < 0
     ? position.entryPrice * (1 - position.takeProfit)
@@ -1697,6 +1879,7 @@ function takeProfitPrice(position: Position): number | undefined {
 }
 
 function stopLossPrice(position: Position): number | undefined {
+  if (position.stopLossPrice && position.stopLossPrice > 0) return position.stopLossPrice;
   if (!position.entryPrice || !position.stopLoss) return undefined;
   return position.size < 0
     ? position.entryPrice * (1 + position.stopLoss)
