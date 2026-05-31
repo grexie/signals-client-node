@@ -86,6 +86,15 @@ export interface InfoEvent {
   replayedAt?: string;
 }
 
+export interface BacktestEvent {
+  type: "backtest";
+  subscriptionId: number;
+  venue: string;
+  instrument: string;
+  backtest: unknown;
+  timestamp?: string;
+}
+
 export interface SignalEvent {
   type: "signal";
   subscriptionId: number;
@@ -152,6 +161,7 @@ export type SignalsEvent =
   | SubscribedEvent
   | UnsubscribedEvent
   | InfoEvent
+  | BacktestEvent
   | SignalEvent
   | CreateMarketOrderEvent
   | UpdateTPSLEvent
@@ -217,6 +227,7 @@ interface RawServerEvent {
   timestamp?: string;
   replay?: boolean;
   replayedAt?: string;
+  backtest?: unknown;
   signal?: Partial<Signal>;
   intentId?: string;
   action?: string;
@@ -498,6 +509,15 @@ export function parseEvent(raw: string): SignalsEvent {
         timestamp: msg.timestamp,
         replay: msg.replay,
         replayedAt: msg.replayedAt
+      };
+    case "backtest":
+      return {
+        type: "backtest",
+        subscriptionId: Number(msg.subscriptionId ?? 0),
+        venue: msg.venue ?? "",
+        instrument: msg.instrument ?? "",
+        backtest: msg.backtest ?? {},
+        timestamp: msg.timestamp
       };
     case "signal": {
       const signal = { ...(msg.signal ?? {}) } as Signal;

@@ -78,6 +78,14 @@ export interface InfoEvent {
     replay?: boolean;
     replayedAt?: string;
 }
+export interface BacktestEvent {
+    type: "backtest";
+    subscriptionId: number;
+    venue: string;
+    instrument: string;
+    backtest: unknown;
+    timestamp?: string;
+}
 export interface SignalEvent {
     type: "signal";
     subscriptionId: number;
@@ -134,7 +142,7 @@ export interface ErrorEvent {
     code?: string;
     message?: string;
 }
-export type SignalsEvent = ReadyEvent | SubscribedEvent | UnsubscribedEvent | InfoEvent | SignalEvent | CreateMarketOrderEvent | UpdateTPSLEvent | WithdrawEvent | ErrorEvent;
+export type SignalsEvent = ReadyEvent | SubscribedEvent | UnsubscribedEvent | InfoEvent | BacktestEvent | SignalEvent | CreateMarketOrderEvent | UpdateTPSLEvent | WithdrawEvent | ErrorEvent;
 export interface SignalEventSource {
     events(signal?: AbortSignal): AsyncIterable<SignalsEvent>;
 }

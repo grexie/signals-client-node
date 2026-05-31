@@ -243,6 +243,15 @@ export function parseEvent(raw) {
                 replay: msg.replay,
                 replayedAt: msg.replayedAt
             };
+        case "backtest":
+            return {
+                type: "backtest",
+                subscriptionId: Number(msg.subscriptionId ?? 0),
+                venue: msg.venue ?? "",
+                instrument: msg.instrument ?? "",
+                backtest: msg.backtest ?? {},
+                timestamp: msg.timestamp
+            };
         case "signal": {
             const signal = { ...(msg.signal ?? {}) };
             signal.venue ||= msg.venue ?? "";

@@ -42,6 +42,14 @@ describe("parseEvent", () => {
       replayedAt: "2026-05-26T00:00:01Z"
     }))).toMatchObject({ type: "info", stage: "ready", replay: true });
     expect(parseEvent(JSON.stringify({
+      type: "backtest",
+      subscriptionId: 3,
+      venue: "okx",
+      instrument: "BASKET:1",
+      timestamp: "2026-05-31T17:00:00Z",
+      backtest: { accepted: true, candidate: { total: 0.12 } }
+    }))).toMatchObject({ type: "backtest", subscriptionId: 3, backtest: { accepted: true } });
+    expect(parseEvent(JSON.stringify({
       type: "error",
       code: "forbidden",
       message: "no access"
