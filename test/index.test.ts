@@ -53,13 +53,14 @@ describe("parseEvent", () => {
       type: "create-market-order",
       subscriptionId: 12,
       intentId: "intent_1",
+      reason: "preempted_by_better_route",
       venue: "okx",
       instrument: "BTC-USDT-SWAP",
       side: "buy",
       orderType: "market",
       contractSize: 3,
       leverage: 2
-    }))).toMatchObject({ type: "create-market-order", subscriptionId: 12, intentId: "intent_1", contractSize: 3 });
+    }))).toMatchObject({ type: "create-market-order", subscriptionId: 12, intentId: "intent_1", reason: "preempted_by_better_route", contractSize: 3 });
     expect(parseEvent(JSON.stringify({
       type: "update-tpsl",
       subscriptionId: 12,

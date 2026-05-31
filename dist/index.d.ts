@@ -93,6 +93,7 @@ export interface CreateMarketOrderEvent {
     subscriptionId: number;
     intentId?: string;
     action?: string;
+    reason?: string;
     venue?: string;
     instrument: string;
     side: Side;

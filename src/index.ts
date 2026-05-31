@@ -102,6 +102,7 @@ export interface CreateMarketOrderEvent {
   subscriptionId: number;
   intentId?: string;
   action?: string;
+  reason?: string;
   venue?: string;
   instrument: string;
   side: Side;
@@ -219,6 +220,7 @@ interface RawServerEvent {
   signal?: Partial<Signal>;
   intentId?: string;
   action?: string;
+  reason?: string;
   side?: Side;
   orderType?: string;
   contractSize?: number;
@@ -519,6 +521,7 @@ export function parseEvent(raw: string): SignalsEvent {
         subscriptionId: Number(msg.subscriptionId ?? 0),
         intentId: msg.intentId,
         action: msg.action,
+        reason: msg.reason,
         venue: msg.venue,
         instrument: msg.instrument ?? "",
         side: msg.side ?? "buy",

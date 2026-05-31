@@ -265,6 +265,7 @@ export function parseEvent(raw) {
                 subscriptionId: Number(msg.subscriptionId ?? 0),
                 intentId: msg.intentId,
                 action: msg.action,
+                reason: msg.reason,
                 venue: msg.venue,
                 instrument: msg.instrument ?? "",
                 side: msg.side ?? "buy",
