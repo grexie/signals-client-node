@@ -46,6 +46,16 @@ describe("parseEvent", () => {
       backtest: { accepted: true, candidate: { total: 0.12 } }
     }))).toMatchObject({ type: "backtest", subscriptionId: 3, backtest: { accepted: true } });
     expect(parseEvent(JSON.stringify({
+      type: "basket_updated",
+      subscriptionId: 12,
+      venue: "okx",
+      message: "active"
+    }))).toMatchObject({ type: "basket_updated", subscriptionId: 12, venue: "okx" });
+    expect(parseEvent(JSON.stringify({
+      type: "order_router_forwarded",
+      subscriptionId: 12
+    }))).toMatchObject({ type: "order_router_forwarded", subscriptionId: 12 });
+    expect(parseEvent(JSON.stringify({
       type: "create-market-order",
       subscriptionId: 12,
       intentId: "intent_1",
@@ -113,6 +123,22 @@ describe("SignalsClient", () => {
       venue: "okx",
       instrument: "ETH-USDT-SWAP"
     });
+    client.close();
+    server.close();
+  });
+
+  it("drops leaked basket state frames from the websocket", async () => {
+    const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    const port = (server.address() as { port: number }).port;
+    server.on("connection", (socket) => {
+      socket.send(JSON.stringify({ type: "basket_state", subscriptionId: 9, venue: "okx", message: "active" }));
+      socket.send(JSON.stringify({ type: "order_router_forwarded", subscriptionId: 9 }));
+    });
+
+    const client = new SignalsClient("ws_test", { url: `ws://127.0.0.1:${port}` });
+    await client.connect();
+    await expect(client.receive()).resolves.toMatchObject({ type: "order_router_forwarded", subscriptionId: 9 });
     client.close();
     server.close();
   });

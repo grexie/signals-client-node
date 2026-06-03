@@ -66,7 +66,22 @@ export interface UnsubscribedEvent {
     subscriptionId?: number;
     venue?: string;
     instrument?: string;
+    basketId?: string;
     code?: string;
+    message?: string;
+}
+export interface BasketUpdatedEvent {
+    type: "basket_updated";
+    subscriptionId: number;
+    venue?: string;
+    basketId?: string;
+    message?: string;
+}
+export interface OrderRouterForwardedEvent {
+    type: "order_router_forwarded";
+    subscriptionId: number;
+    venue?: string;
+    basketId?: string;
     message?: string;
 }
 export interface InfoEvent {
@@ -146,7 +161,7 @@ export interface ErrorEvent {
     code?: string;
     message?: string;
 }
-export type SignalsEvent = ReadyEvent | SubscribedEvent | UnsubscribedEvent | InfoEvent | BacktestEvent | SignalEvent | CreateMarketOrderEvent | UpdateTPSLEvent | WithdrawEvent | ErrorEvent;
+export type SignalsEvent = ReadyEvent | SubscribedEvent | UnsubscribedEvent | BasketUpdatedEvent | OrderRouterForwardedEvent | InfoEvent | BacktestEvent | SignalEvent | CreateMarketOrderEvent | UpdateTPSLEvent | WithdrawEvent | ErrorEvent;
 export interface SignalEventSource {
     events(signal?: AbortSignal): AsyncIterable<SignalsEvent>;
 }

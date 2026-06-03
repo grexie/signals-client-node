@@ -72,7 +72,24 @@ export interface UnsubscribedEvent {
   subscriptionId?: number;
   venue?: string;
   instrument?: string;
+  basketId?: string;
   code?: string;
+  message?: string;
+}
+
+export interface BasketUpdatedEvent {
+  type: "basket_updated";
+  subscriptionId: number;
+  venue?: string;
+  basketId?: string;
+  message?: string;
+}
+
+export interface OrderRouterForwardedEvent {
+  type: "order_router_forwarded";
+  subscriptionId: number;
+  venue?: string;
+  basketId?: string;
   message?: string;
 }
 
@@ -164,6 +181,8 @@ export type SignalsEvent =
   | ReadyEvent
   | SubscribedEvent
   | UnsubscribedEvent
+  | BasketUpdatedEvent
+  | OrderRouterForwardedEvent
   | InfoEvent
   | BacktestEvent
   | SignalEvent
@@ -313,6 +332,7 @@ interface RawServerEvent {
   subscriptionId?: number;
   venue?: string;
   instrument?: string;
+  basketId?: string;
   code?: string;
   message?: string;
   stage?: string;
@@ -374,7 +394,11 @@ export class SignalsClient extends EventEmitter implements SignalsManagerClient 
     };
     this.terminalError = undefined;
     this.ws = new this.options.WebSocketCtor(this.options.url, { headers });
-    this.ws.on("message", (data) => this.accept(parseEvent(data.toString())));
+    this.ws.on("message", (data) => {
+      const raw = data.toString();
+      if (isIgnoredWebSocketMessage(raw)) return;
+      this.accept(parseEvent(raw));
+    });
     this.ws.on("error", (error) => this.fail(error instanceof Error ? error : new Error(String(error))));
     this.ws.on("close", () => this.closeStreams(new Error("signals-client: websocket closed")));
     return new Promise((resolve, reject) => {
@@ -849,6 +873,22 @@ export function parseEvent(raw: string): SignalsEvent {
         code: msg.code,
         message: msg.message
       };
+    case "basket_updated":
+      return {
+        type: "basket_updated",
+        subscriptionId: Number(msg.subscriptionId ?? 0),
+        venue: msg.venue,
+        basketId: msg.basketId,
+        message: msg.message
+      };
+    case "order_router_forwarded":
+      return {
+        type: "order_router_forwarded",
+        subscriptionId: Number(msg.subscriptionId ?? 0),
+        venue: msg.venue,
+        basketId: msg.basketId,
+        message: msg.message
+      };
     case "info":
       return {
         type: "info",
@@ -936,6 +976,14 @@ export function parseEvent(raw: string): SignalsEvent {
       return { type: "error", code: msg.code, message: msg.message };
     default:
       throw new Error(`signals-client: unsupported websocket event type ${String(msg.type)}`);
+  }
+}
+
+function isIgnoredWebSocketMessage(raw: string): boolean {
+  try {
+    return (JSON.parse(raw) as Partial<RawServerEvent>).type === "basket_state";
+  } catch {
+    return false;
   }
 }
 
