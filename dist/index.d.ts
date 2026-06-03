@@ -273,6 +273,8 @@ export interface SignalsManagerState {
 export type Intent = CreateMarketOrderEvent;
 /** Transport contract used by SignalsManager. */
 export interface SignalsManagerClient extends SignalEventSource {
+    /** Optional reconnect hook used by SignalsManager.run after websocket drops. */
+    connect?(): Promise<void>;
     subscribeBasket(request: SubscribeRequest): void;
     unsubscribe(subscriptionId: number): void;
     updateAsset(subscriptionId: number, asset: AssetSnapshot): void;
@@ -385,6 +387,9 @@ export declare class SignalsManager extends EventEmitter {
     private applyTPSLUpdate;
     private recordAsset;
     private recordPosition;
+    private canReconnect;
+    private connectIfSupported;
+    private sendLive;
 }
 /** Parse one raw websocket JSON message into a typed event. */
 export declare function parseEvent(raw: string): SignalsEvent;

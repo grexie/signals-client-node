@@ -314,6 +314,8 @@ export type Intent = CreateMarketOrderEvent;
 
 /** Transport contract used by SignalsManager. */
 export interface SignalsManagerClient extends SignalEventSource {
+  /** Optional reconnect hook used by SignalsManager.run after websocket drops. */
+  connect?(): Promise<void>;
   subscribeBasket(request: SubscribeRequest): void;
   unsubscribe(subscriptionId: number): void;
   updateAsset(subscriptionId: number, asset: AssetSnapshot): void;
@@ -655,16 +657,29 @@ export class SignalsManager extends EventEmitter {
 
   /** Subscribe, process events until the stream ends, then unsubscribe. */
   async run(signal?: AbortSignal): Promise<void> {
-    this.subscribe();
-    try {
-      for await (const event of this.client.events(signal)) {
-        this.handleEvent(event);
-      }
-    } finally {
-      if (this.subscriptionId > 0) {
-        this.client.unsubscribe(this.subscriptionId);
+    let backoffMs = 1000;
+    for (;;) {
+      if (signal?.aborted) break;
+      try {
+        await this.connectIfSupported();
         this.subscriptionId = 0;
+        this.subscribe();
+        for await (const event of this.client.events(signal)) {
+          this.handleEvent(event);
+        }
+        if (!this.canReconnect() || signal?.aborted) break;
+        backoffMs = 1000;
+      } catch (error) {
+        if (signal?.aborted) break;
+        if (!this.canReconnect()) throw error;
       }
+      this.subscriptionId = 0;
+      await reconnectDelay(backoffMs, signal);
+      backoffMs = Math.min(backoffMs * 2, 30_000);
+    }
+    if (this.subscriptionId > 0) {
+      this.sendLive(() => this.client.unsubscribe(this.subscriptionId));
+      this.subscriptionId = 0;
     }
   }
 
@@ -685,7 +700,7 @@ export class SignalsManager extends EventEmitter {
   updateAsset(asset: AssetSnapshot): void {
     const next = this.recordAsset(asset);
     if (next && this.subscriptionId > 0) {
-      this.client.updateAsset(this.subscriptionId, next);
+      this.sendLive(() => this.client.updateAsset(this.subscriptionId, next));
     }
   }
 
@@ -693,7 +708,7 @@ export class SignalsManager extends EventEmitter {
   updatePosition(position: Position): void {
     const next = this.recordPosition(position);
     if (next && this.subscriptionId > 0) {
-      this.client.updatePosition(this.subscriptionId, next);
+      this.sendLive(() => this.client.updatePosition(this.subscriptionId, next));
     }
   }
 
@@ -703,7 +718,7 @@ export class SignalsManager extends EventEmitter {
     if (!normalized) return;
     this.cfg.instruments = normalizeInstrumentList([...this.cfg.instruments, normalized]);
     if (this.subscriptionId > 0) {
-      this.client.addInstrument(this.subscriptionId, normalized);
+      this.sendLive(() => this.client.addInstrument(this.subscriptionId, normalized));
     }
   }
 
@@ -712,7 +727,7 @@ export class SignalsManager extends EventEmitter {
     const normalized = normalizeInstrument(instrument);
     this.cfg.instruments = this.cfg.instruments.filter((current) => current !== normalized);
     if (this.subscriptionId > 0) {
-      this.client.removeInstrument(this.subscriptionId, normalized);
+      this.sendLive(() => this.client.removeInstrument(this.subscriptionId, normalized));
     }
   }
 
@@ -722,7 +737,7 @@ export class SignalsManager extends EventEmitter {
     this.cfg.risk = applyRuntimeConfigToRisk(this.cfg.risk, runtime);
     this.cfg.profitWithdrawRatio = runtime.profitWithdrawRatio ?? 0;
     if (this.subscriptionId > 0) {
-      this.client.updateConfig(this.subscriptionId, runtime);
+      this.sendLive(() => this.client.updateConfig(this.subscriptionId, runtime));
     }
   }
 
@@ -770,10 +785,10 @@ export class SignalsManager extends EventEmitter {
     if (event.type === "subscribed" && event.subscriptionId > 0) {
       this.subscriptionId = event.subscriptionId;
       for (const asset of this.assets()) {
-        this.client.updateAsset(this.subscriptionId, asset);
+        this.sendLive(() => this.client.updateAsset(this.subscriptionId, asset));
       }
       for (const position of this.positions()) {
-        this.client.updatePosition(this.subscriptionId, position);
+        this.sendLive(() => this.client.updatePosition(this.subscriptionId, position));
       }
     } else if (event.type === "unsubscribed" && event.subscriptionId === this.subscriptionId) {
       this.subscriptionId = 0;
@@ -852,6 +867,26 @@ export class SignalsManager extends EventEmitter {
       this.positionsByKey.set(key, next);
     }
     return next;
+  }
+
+  private canReconnect(): boolean {
+    return typeof this.client.connect === "function";
+  }
+
+  private async connectIfSupported(): Promise<void> {
+    if (this.client.connect) {
+      await this.client.connect();
+    }
+  }
+
+  private sendLive(send: () => void): void {
+    try {
+      send();
+    } catch (error) {
+      if (!this.canReconnect()) {
+        throw error;
+      }
+    }
   }
 }
 
@@ -1008,6 +1043,20 @@ function websocketUrlFromBase(baseUrl?: string): string | undefined {
   url.search = "";
   url.hash = "";
   return url.toString();
+}
+
+function reconnectDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const timeout = setTimeout(resolve, ms);
+    if (!signal) return;
+    signal.addEventListener("abort", () => {
+      clearTimeout(timeout);
+      resolve();
+    }, { once: true });
+  });
 }
 
 function normalizeSignalsManagerConfig(config: SignalsManagerConfig): Required<SignalsManagerConfig> {

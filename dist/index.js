@@ -269,17 +269,34 @@ export class SignalsManager extends EventEmitter {
     }
     /** Subscribe, process events until the stream ends, then unsubscribe. */
     async run(signal) {
-        this.subscribe();
-        try {
-            for await (const event of this.client.events(signal)) {
-                this.handleEvent(event);
-            }
-        }
-        finally {
-            if (this.subscriptionId > 0) {
-                this.client.unsubscribe(this.subscriptionId);
+        let backoffMs = 1000;
+        for (;;) {
+            if (signal?.aborted)
+                break;
+            try {
+                await this.connectIfSupported();
                 this.subscriptionId = 0;
+                this.subscribe();
+                for await (const event of this.client.events(signal)) {
+                    this.handleEvent(event);
+                }
+                if (!this.canReconnect() || signal?.aborted)
+                    break;
+                backoffMs = 1000;
             }
+            catch (error) {
+                if (signal?.aborted)
+                    break;
+                if (!this.canReconnect())
+                    throw error;
+            }
+            this.subscriptionId = 0;
+            await reconnectDelay(backoffMs, signal);
+            backoffMs = Math.min(backoffMs * 2, 30_000);
+        }
+        if (this.subscriptionId > 0) {
+            this.sendLive(() => this.client.unsubscribe(this.subscriptionId));
+            this.subscriptionId = 0;
         }
     }
     /** Subscribe the configured basket and send current snapshots. */
@@ -298,14 +315,14 @@ export class SignalsManager extends EventEmitter {
     updateAsset(asset) {
         const next = this.recordAsset(asset);
         if (next && this.subscriptionId > 0) {
-            this.client.updateAsset(this.subscriptionId, next);
+            this.sendLive(() => this.client.updateAsset(this.subscriptionId, next));
         }
     }
     /** Record and, once subscribed, send a venue position snapshot. */
     updatePosition(position) {
         const next = this.recordPosition(position);
         if (next && this.subscriptionId > 0) {
-            this.client.updatePosition(this.subscriptionId, next);
+            this.sendLive(() => this.client.updatePosition(this.subscriptionId, next));
         }
     }
     /** Add an instrument locally and to the live subscription. */
@@ -315,7 +332,7 @@ export class SignalsManager extends EventEmitter {
             return;
         this.cfg.instruments = normalizeInstrumentList([...this.cfg.instruments, normalized]);
         if (this.subscriptionId > 0) {
-            this.client.addInstrument(this.subscriptionId, normalized);
+            this.sendLive(() => this.client.addInstrument(this.subscriptionId, normalized));
         }
     }
     /** Remove an instrument locally and from the live subscription. */
@@ -323,7 +340,7 @@ export class SignalsManager extends EventEmitter {
         const normalized = normalizeInstrument(instrument);
         this.cfg.instruments = this.cfg.instruments.filter((current) => current !== normalized);
         if (this.subscriptionId > 0) {
-            this.client.removeInstrument(this.subscriptionId, normalized);
+            this.sendLive(() => this.client.removeInstrument(this.subscriptionId, normalized));
         }
     }
     /** Apply and optionally send a runtime router config patch. */
@@ -332,7 +349,7 @@ export class SignalsManager extends EventEmitter {
         this.cfg.risk = applyRuntimeConfigToRisk(this.cfg.risk, runtime);
         this.cfg.profitWithdrawRatio = runtime.profitWithdrawRatio ?? 0;
         if (this.subscriptionId > 0) {
-            this.client.updateConfig(this.subscriptionId, runtime);
+            this.sendLive(() => this.client.updateConfig(this.subscriptionId, runtime));
         }
     }
     /** Schedule a withdrawal through the live router subscription. */
@@ -374,10 +391,10 @@ export class SignalsManager extends EventEmitter {
         if (event.type === "subscribed" && event.subscriptionId > 0) {
             this.subscriptionId = event.subscriptionId;
             for (const asset of this.assets()) {
-                this.client.updateAsset(this.subscriptionId, asset);
+                this.sendLive(() => this.client.updateAsset(this.subscriptionId, asset));
             }
             for (const position of this.positions()) {
-                this.client.updatePosition(this.subscriptionId, position);
+                this.sendLive(() => this.client.updatePosition(this.subscriptionId, position));
             }
         }
         else if (event.type === "unsubscribed" && event.subscriptionId === this.subscriptionId) {
@@ -463,6 +480,24 @@ export class SignalsManager extends EventEmitter {
             this.positionsByKey.set(key, next);
         }
         return next;
+    }
+    canReconnect() {
+        return typeof this.client.connect === "function";
+    }
+    async connectIfSupported() {
+        if (this.client.connect) {
+            await this.client.connect();
+        }
+    }
+    sendLive(send) {
+        try {
+            send();
+        }
+        catch (error) {
+            if (!this.canReconnect()) {
+                throw error;
+            }
+        }
     }
 }
 /** Parse one raw websocket JSON message into a typed event. */
@@ -617,6 +652,20 @@ function websocketUrlFromBase(baseUrl) {
     url.search = "";
     url.hash = "";
     return url.toString();
+}
+function reconnectDelay(ms, signal) {
+    if (signal?.aborted) {
+        return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+        const timeout = setTimeout(resolve, ms);
+        if (!signal)
+            return;
+        signal.addEventListener("abort", () => {
+            clearTimeout(timeout);
+            resolve();
+        }, { once: true });
+    });
 }
 function normalizeSignalsManagerConfig(config) {
     return {

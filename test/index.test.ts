@@ -220,6 +220,29 @@ describe("SignalsManager", () => {
     expect(client.sent).toContainEqual(expect.objectContaining({ type: "update-asset", subscriptionId: 15, currency: "USDT" }));
     expect(client.sent).toContainEqual(expect.objectContaining({ type: "update-position", subscriptionId: 15, side: "sell", size: 4 }));
   });
+
+  it("silently reconnects and resubscribes with current state", async () => {
+    const client = new ReconnectingFakeManagerClient();
+    const manager = new SignalsManager(client, {}, { venue: "okx", instruments: ["BTC-USDT-SWAP"] });
+    const abort = new AbortController();
+    const run = manager.run(abort.signal);
+
+    await waitFor(() => manager.subscription() === 7);
+    manager.updateAsset({ currency: "usdt", available: 100, equity: 100 });
+    manager.updatePosition({ instrument: "BTC-USDT-SWAP", size: 2, entryPrice: 100, lastPrice: 101 });
+    client.drop();
+
+    await waitFor(() => client.sent.filter((item) => item.type === "subscribe").length >= 2);
+    const replay = client.sent.filter((item) => item.type === "subscribe").at(-1);
+    expect(replay).toMatchObject({
+      type: "subscribe",
+      assets: [expect.objectContaining({ currency: "USDT" })],
+      positions: [expect.objectContaining({ instrument: "BTC-USDT-SWAP" })]
+    });
+
+    abort.abort();
+    await run;
+  });
 });
 
 class FakeManagerClient {
@@ -262,4 +285,46 @@ class FakeManagerClient {
   scheduleWithdrawal(subscriptionId: number, withdrawal: unknown): void {
     this.sent.push({ type: "schedule-withdrawal", subscriptionId, ...(withdrawal as Record<string, unknown>) });
   }
+}
+
+class ReconnectingFakeManagerClient extends FakeManagerClient {
+  private attempt = 0;
+  private dropFirst?: () => void;
+  readonly connects: number[] = [];
+
+  constructor() {
+    super([]);
+  }
+
+  async connect(): Promise<void> {
+    this.connects.push(Date.now());
+  }
+
+  override async *events(signal?: AbortSignal): AsyncIterable<SignalsEvent> {
+    this.attempt += 1;
+    if (this.attempt === 1) {
+      yield { type: "subscribed", subscriptionId: 7, venue: "okx", instrument: "BTC-USDT-SWAP" };
+      await new Promise<void>((resolve) => {
+        this.dropFirst = resolve;
+      });
+      throw new Error("websocket closed");
+    }
+    yield { type: "subscribed", subscriptionId: 8, venue: "okx", instrument: "BTC-USDT-SWAP" };
+    while (!signal?.aborted) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  drop(): void {
+    this.dropFirst?.();
+  }
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("timed out waiting for condition");
 }
