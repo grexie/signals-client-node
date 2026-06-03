@@ -32,11 +32,20 @@ describe("parseEvent", () => {
       subscriptionId: 3,
       venue: "okx",
       instrument: "DOGE-USDT-SWAP",
+      level: "debug",
       stage: "ready",
       message: "ready",
       replay: true,
       replayedAt: "2026-05-26T00:00:01Z"
-    }))).toMatchObject({ type: "info", stage: "ready", replay: true });
+    }))).toMatchObject({ type: "info", level: "debug", stage: "ready", replay: true });
+    expect(parseEvent(JSON.stringify({
+      type: "info",
+      subscriptionId: 3,
+      venue: "okx",
+      instrument: "DOGE-USDT-SWAP",
+      stage: "ready",
+      message: "ready"
+    }))).toMatchObject({ type: "info", level: "info" });
     expect(parseEvent(JSON.stringify({
       type: "backtest",
       subscriptionId: 3,

@@ -28,7 +28,7 @@ const manager = new SignalsManager(client, {
 });
 
 manager.on("message", (event) => {
-  console.log(`info instrument=${event.instrument} stage=${event.stage} message="${event.message}"`);
+  console.log(`info level=${event.level} instrument=${event.instrument} stage=${event.stage} message="${event.message}"`);
 });
 manager.on("intent", (intent) => {
   console.log(`intent action=${intent.action ?? ""} reason=${intent.reason ?? ""} instrument=${intent.instrument} side=${intent.side} contracts=${intent.contractSize ?? 0} reduce_only=${!!intent.reduceOnly}`);

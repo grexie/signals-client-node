@@ -509,6 +509,7 @@ export function parseEvent(raw) {
                 subscriptionId: Number(msg.subscriptionId ?? 0),
                 venue: msg.venue ?? "",
                 instrument: msg.instrument ?? "",
+                level: normalizeInfoLevel(msg.level),
                 stage: msg.stage ?? "",
                 message: msg.message ?? "",
                 timestamp: msg.timestamp,
@@ -591,6 +592,13 @@ export function parseEvent(raw) {
         default:
             throw new Error(`signals-client: unsupported websocket event type ${String(msg.type)}`);
     }
+}
+function normalizeInfoLevel(value) {
+    const level = typeof value === "string" ? value.trim().toLowerCase() : "";
+    if (level === "error" || level === "warn" || level === "debug") {
+        return level;
+    }
+    return "info";
 }
 function isIgnoredWebSocketMessage(raw) {
     try {

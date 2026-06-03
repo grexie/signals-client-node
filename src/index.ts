@@ -93,11 +93,14 @@ export interface OrderRouterForwardedEvent {
   message?: string;
 }
 
+export type InfoLevel = "info" | "error" | "warn" | "debug";
+
 export interface InfoEvent {
   type: "info";
   subscriptionId: number;
   venue: string;
   instrument: string;
+  level: InfoLevel;
   stage: string;
   message: string;
   timestamp?: string;
@@ -336,6 +339,7 @@ interface RawServerEvent {
   code?: string;
   message?: string;
   stage?: string;
+  level?: string;
   timestamp?: string;
   replay?: boolean;
   replayedAt?: string;
@@ -895,6 +899,7 @@ export function parseEvent(raw: string): SignalsEvent {
         subscriptionId: Number(msg.subscriptionId ?? 0),
         venue: msg.venue ?? "",
         instrument: msg.instrument ?? "",
+        level: normalizeInfoLevel(msg.level),
         stage: msg.stage ?? "",
         message: msg.message ?? "",
         timestamp: msg.timestamp,
@@ -977,6 +982,14 @@ export function parseEvent(raw: string): SignalsEvent {
     default:
       throw new Error(`signals-client: unsupported websocket event type ${String(msg.type)}`);
   }
+}
+
+function normalizeInfoLevel(value: unknown): InfoLevel {
+  const level = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (level === "error" || level === "warn" || level === "debug") {
+    return level;
+  }
+  return "info";
 }
 
 function isIgnoredWebSocketMessage(raw: string): boolean {

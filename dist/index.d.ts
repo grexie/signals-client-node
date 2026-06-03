@@ -84,11 +84,13 @@ export interface OrderRouterForwardedEvent {
     basketId?: string;
     message?: string;
 }
+export type InfoLevel = "info" | "error" | "warn" | "debug";
 export interface InfoEvent {
     type: "info";
     subscriptionId: number;
     venue: string;
     instrument: string;
+    level: InfoLevel;
     stage: string;
     message: string;
     timestamp?: string;
