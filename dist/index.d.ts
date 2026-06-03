@@ -164,6 +164,40 @@ export interface RiskConfig {
 export interface RuntimeConfig {
     profitWithdrawRatio?: number;
 }
+export interface AssetSnapshot {
+    venue?: string;
+    currency: string;
+    cash?: number;
+    available?: number;
+    used?: number;
+    equity?: number;
+    maxUsage?: number;
+    updatedAt?: Date | string;
+}
+export interface Position {
+    venue?: string;
+    instrument: string;
+    status?: string;
+    size: number;
+    confidence?: number;
+    entryPrice?: number;
+    lastPrice?: number;
+    takeProfit?: number;
+    stopLoss?: number;
+    takeProfitPrice?: number;
+    stopLossPrice?: number;
+    trailingStopActivation?: number;
+    trailingStopDistance?: number;
+    trailingStopMinProfit?: number;
+    leverage?: number;
+    mfe?: number;
+    mae?: number;
+    realizedGross?: number;
+    fees?: number;
+    realizedPnL?: number;
+    openedAt?: string | Date;
+    lastSignalAt?: string | Date;
+}
 export interface SubscribeRequest {
     venue: string;
     instruments: string[];
@@ -179,7 +213,29 @@ export interface WithdrawalRequest {
     amount: number;
     reason?: string;
 }
-export declare class SignalsClient extends EventEmitter {
+export interface SignalsManagerConfig {
+    venue?: string;
+    instruments?: string[];
+    mode?: string;
+    risk?: RiskConfig;
+    profitWithdrawRatio?: number;
+}
+export interface SignalsManagerState {
+    assets?: AssetSnapshot[];
+    positions?: Position[];
+}
+export type Intent = CreateMarketOrderEvent;
+export interface SignalsManagerClient extends SignalEventSource {
+    subscribeBasket(request: SubscribeRequest): void;
+    unsubscribe(subscriptionId: number): void;
+    updateAsset(subscriptionId: number, asset: AssetSnapshot): void;
+    updatePosition(subscriptionId: number, position: Position): void;
+    addInstrument(subscriptionId: number, instrument: string): void;
+    removeInstrument(subscriptionId: number, instrument: string): void;
+    updateConfig(subscriptionId: number, config: RuntimeConfig): void;
+    scheduleWithdrawal(subscriptionId: number, withdrawal: WithdrawalRequest): void;
+}
+export declare class SignalsClient extends EventEmitter implements SignalsManagerClient {
     private readonly token;
     private readonly options;
     private ws?;
@@ -209,250 +265,31 @@ export declare class SignalsClient extends EventEmitter {
     private rejectWaiters;
     private removeWaiter;
 }
-export declare function parseEvent(raw: string): SignalsEvent;
-export interface InstrumentConfig {
-    makerFeeRate?: number;
-    takerFeeRate?: number;
-    minLeverage?: number;
-    maxLeverage?: number;
-    trailingStopActivation?: number;
-    trailingStopDistance?: number;
-    trailingStopMinProfit?: number;
-    managePositionsOnly?: boolean;
-}
-export interface AssetSnapshot {
-    venue?: string;
-    currency: string;
-    cash?: number;
-    available?: number;
-    used?: number;
-    equity?: number;
-    maxUsage?: number;
-    updatedAt?: Date;
-}
-export declare class AssetManager {
+export declare class SignalsManager extends EventEmitter {
+    private readonly client;
+    private cfg;
+    private subscriptionId;
     private readonly assetsByCurrency;
-    updateAsset(snapshot: AssetSnapshot): void;
-    asset(currency: string): Required<AssetSnapshot> | undefined;
-    assets(): Required<AssetSnapshot>[];
-}
-export interface InstrumentMetadata {
-    venue: string;
-    instrument: string;
-    settlementCurrency?: string;
-    lotSize?: number;
-    minSize?: number;
-    tickSize?: number;
-    contractValue?: number;
-    contractMultiplier?: number;
-    maxLeverage?: number;
-}
-export declare class InstrumentManager {
-    private readonly instrumentsByKey;
-    updateInstrument(metadata: InstrumentMetadata): void;
-    removeInstrument(venue: string, instrument: string): void;
-    instrument(venue: string, instrument: string): Required<InstrumentMetadata> | undefined;
-    instruments(): Required<InstrumentMetadata>[];
-}
-export interface PositionManagerConfig {
-    maxMarginRatio?: number;
-    /** @deprecated use maxMarginRatio. */
-    positionSize?: number;
-    minExpectedEdge?: number;
-    minOrderDelta?: number;
-    minPositionSizeRatio?: number;
-    rebalanceIntervalMs?: number;
-    flipFlopWindowMs?: number;
-    signalFlipMinConfidence?: number;
-    makerFeeRate?: number;
-    takerFeeRate?: number;
-    minLeverage?: number;
-    maxLeverage?: number;
-    availableMarginBuffer?: number;
-    executableMarginBuffer?: number;
-    instruments?: Record<string, InstrumentConfig>;
-    assetManager?: AssetManager;
-    instrumentManager?: InstrumentManager;
-    initialState?: PositionManagerState;
-    persist?: PositionManagerPersist;
-}
-export type PositionManagerPersist = (state: PositionManagerState) => void;
-export interface PositionManagerState {
-    positions: Position[];
-    closedTrades?: ClosedTrade[];
-}
-export interface Position {
-    venue: string;
-    instrument: string;
-    status?: "open" | "closed";
-    size: number;
-    confidence: number;
-    entryPrice?: number;
-    lastPrice?: number;
-    takeProfit?: number;
-    stopLoss?: number;
-    takeProfitPrice?: number;
-    stopLossPrice?: number;
-    trailingStopActivation?: number;
-    trailingStopDistance?: number;
-    trailingStopMinProfit?: number;
-    leverage?: number;
-    mfe?: number;
-    mae?: number;
-    realizedGross?: number;
-    fees?: number;
-    realizedPnl?: number;
-    openedAt?: Date;
-    lastSignalAt?: Date;
-}
-export interface Order {
-    venue: string;
-    instrument: string;
-    side: Side;
-    reason: string;
-    sizeDelta: number;
-    previousSize: number;
-    targetSize: number;
-    price?: number;
-    confidence: number;
-    score?: number;
-    expectedEdge: number;
-    feeRate: number;
-    estimatedFee: number;
-    estimatedFeeValue: number;
-    margin: number;
-    quantity: number;
-    notional: number;
-    settlementCurrency: string;
-    minSize: number;
-    lotSize: number;
-    tickSize: number;
-    leverage: number;
-    takeProfit?: number;
-    stopLoss?: number;
-    trailingStopActivation?: number;
-    trailingStopDistance?: number;
-    trailingStopMinProfit?: number;
-    reduceOnly?: boolean;
-    timestamp: Date;
-    subscriptionId?: number;
-    replay?: boolean;
-}
-export interface ClosedTrade {
-    venue: string;
-    instrument: string;
-    side: Side;
-    size: number;
-    entryPrice?: number;
-    exitPrice?: number;
-    exitMove?: number;
-    realizedGross: number;
-    fees: number;
-    realizedPnl: number;
-    mfe?: number;
-    mae?: number;
-    exitReason?: string;
-    openedAt?: Date;
-    closedAt: Date;
-}
-export interface InstrumentPositionStats {
-    venue: string;
-    instrument: string;
-    settlementCurrency: string;
-    side: Side | "";
-    size: number;
-    quantity: number;
-    notional: number;
-    realizedPnl: number;
-    unrealizedPnl: number;
-    fees: number;
-    realizedPnlPercent: number;
-    unrealizedPnlPercent: number;
-    totalPnlPercent: number;
-    leverage: number;
-}
-export interface CurrencyPositionStats {
-    settlementCurrency: string;
-    equity: number;
-    available: number;
-    used: number;
-    realizedPnl: number;
-    unrealizedPnl: number;
-    fees: number;
-    realizedPnlPercent: number;
-    unrealizedPnlPercent: number;
-    totalPnlPercent: number;
-}
-export interface PositionStats {
-    equity: number;
-    available: number;
-    used: number;
-    realizedPnl: number;
-    unrealizedPnl: number;
-    fees: number;
-    realizedPnlPercent: number;
-    unrealizedPnlPercent: number;
-    totalPnlPercent: number;
-    byInstrument: Record<string, InstrumentPositionStats>;
-    byCurrency: Record<string, CurrencyPositionStats>;
-}
-export declare function productionPositionManagerConfig(overrides?: PositionManagerConfig): PositionManagerConfig;
-export declare class PositionManager {
-    private readonly client?;
-    private config;
-    private assets;
-    private instrumentMetadata;
     private readonly positionsByKey;
-    private readonly closed;
-    constructor(client?: SignalEventSource, config?: PositionManagerConfig);
-    assetManager(): AssetManager;
-    instrumentManager(): InstrumentManager;
-    updateConfig(config: PositionManagerConfig): void;
-    run(signal?: AbortSignal): AsyncIterableIterator<Order>;
-    addPosition(position: Position): void;
+    constructor(client: SignalsManagerClient, state?: SignalsManagerState, config?: SignalsManagerConfig);
+    run(signal?: AbortSignal): Promise<void>;
+    subscribe(): void;
+    updateAsset(asset: AssetSnapshot): void;
     updatePosition(position: Position): void;
-    replacePositions(positions: Position[]): void;
-    closePosition(venue: string, instrument: string): Order[];
+    addInstrument(instrument: string): void;
+    removeInstrument(instrument: string): void;
+    updateConfig(config: RuntimeConfig): void;
+    scheduleWithdrawal(withdrawal: WithdrawalRequest): void;
+    subscription(): number;
+    assets(): AssetSnapshot[];
     positions(): Position[];
-    closedTrades(): ClosedTrade[];
-    state(): PositionManagerState;
-    stats(): PositionStats;
-    updatePrice(venue: string, instrument: string, price: number, timestamp?: Date): Order[];
-    handleEvent(event: SignalsEvent): Order[];
-    handleSignal(signal: Signal): Order[];
-    private hydrateState;
-    private persist;
-    private rebalance;
-    private allocateTargetSizes;
-    private materializeRebalanceOrders;
-    private availableExposureBudget;
-    private availablePortfolioBudget;
-    private maxPortfolioMarginBudget;
-    private portfolioCapital;
-    private positionMargin;
-    private marginForQuantity;
-    private positionUnrealizedPnl;
-    private realizedGrossForQuantity;
-    private feeForQuantity;
-    private executableAllocationForBudget;
-    private executableLotStepCost;
-    private capOpeningDeltaToBudget;
-    private capExecutableDeltaWithBufferedCost;
-    private capContinuousOpeningDeltaToBudget;
-    private shouldSkipRebalanceDelta;
-    private shouldSuppressFlipFlop;
-    private orderForDelta;
-    private applyDelta;
-    private effectiveMinOrderDelta;
-    private minimumPositionSize;
-    private meetsMinimumPositionSize;
-    private selectLeverage;
-    private makerFeeRate;
-    private takerFeeRate;
-    private minLeverage;
-    private maxLeverage;
-    private trailingConfigForSignal;
-    private instrumentFor;
-    private orderMeetsInstrumentMinimum;
+    availableOrderCash(currency: string): number;
+    state(): SignalsManagerState;
+    handleEvent(event: SignalsEvent): void;
+    private acceptsEvent;
+    private applyTPSLUpdate;
+    private recordAsset;
+    private recordPosition;
 }
+export declare function parseEvent(raw: string): SignalsEvent;
 //# sourceMappingURL=index.d.ts.map

@@ -1,31 +1,8 @@
-# Node Signalsbot Example
+# signalsbot Node Example
 
-Paper-trading command line bot for Grexie Signals. It subscribes to `SIGNALS_INSTRUMENTS`, reads OKX candle prices, feeds the Node client `PositionManager`, and persists positions, closed trades, orders, and snapshots in a local JSON file database.
-
-## Run
+Minimal router-intent listener for Grexie Signals. It subscribes through `SignalsManager`, logs server-created intents, and leaves venue execution to your own integration.
 
 ```sh
-cd examples/signalsbot
 cp .env.example .env
-$EDITOR .env
-npm install
-npm start -- papertrader
+npm start
 ```
-
-The bot logs `Position Opened`, `Position Closed`, `Added margin to position`, and `Removed margin from position` lines with sizing, fees, risk, and PnL details. Every five minutes it prints position-manager stats and current PnL.
-
-Clean the local JSON database with:
-
-```sh
-npm start -- clean
-```
-
-## Docker
-
-```sh
-cd examples/signalsbot
-cp .env.example .env
-docker compose up --build
-```
-
-The compose file stores the local database in the `signalsbot-data` volume.
