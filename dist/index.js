@@ -59,6 +59,7 @@ export class SignalsClient extends EventEmitter {
             size: Math.abs(position.size),
             entryPrice: position.entryPrice,
             markPrice: position.lastPrice,
+            margin: position.margin,
             leverage: position.leverage,
             takeProfitPrice: position.takeProfitPrice,
             stopLossPrice: position.stopLossPrice
@@ -479,7 +480,9 @@ export function parseEvent(raw) {
                 side: msg.side ?? "buy",
                 orderType: msg.orderType,
                 contractSize: msg.contractSize,
+                margin: msg.margin,
                 leverage: msg.leverage,
+                confidence: msg.confidence,
                 reduceOnly: msg.reduceOnly,
                 takeProfitPrice: msg.takeProfitPrice,
                 stopLossPrice: msg.stopLossPrice,

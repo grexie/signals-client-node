@@ -107,7 +107,9 @@ export interface CreateMarketOrderEvent {
     side: Side;
     orderType?: string;
     contractSize?: number;
+    margin?: number;
     leverage?: number;
+    confidence?: number;
     reduceOnly?: boolean;
     takeProfitPrice?: number;
     stopLossPrice?: number;
@@ -189,6 +191,7 @@ export interface Position {
     trailingStopActivation?: number;
     trailingStopDistance?: number;
     trailingStopMinProfit?: number;
+    margin?: number;
     leverage?: number;
     mfe?: number;
     mae?: number;

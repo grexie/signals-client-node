@@ -55,8 +55,10 @@ describe("parseEvent", () => {
       side: "buy",
       orderType: "market",
       contractSize: 3,
-      leverage: 2
-    }))).toMatchObject({ type: "create-market-order", subscriptionId: 12, intentId: "intent_1", reason: "preempted_by_better_route", contractSize: 3 });
+      margin: 125.5,
+      leverage: 2,
+      confidence: 0.73
+    }))).toMatchObject({ type: "create-market-order", subscriptionId: 12, intentId: "intent_1", reason: "preempted_by_better_route", contractSize: 3, margin: 125.5, leverage: 2, confidence: 0.73 });
     expect(parseEvent(JSON.stringify({
       type: "update-tpsl",
       subscriptionId: 12,

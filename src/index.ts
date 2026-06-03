@@ -117,7 +117,9 @@ export interface CreateMarketOrderEvent {
   side: Side;
   orderType?: string;
   contractSize?: number;
+  margin?: number;
   leverage?: number;
+  confidence?: number;
   reduceOnly?: boolean;
   takeProfitPrice?: number;
   stopLossPrice?: number;
@@ -219,6 +221,7 @@ export interface Position {
   trailingStopActivation?: number;
   trailingStopDistance?: number;
   trailingStopMinProfit?: number;
+  margin?: number;
   leverage?: number;
   mfe?: number;
   mae?: number;
@@ -297,7 +300,9 @@ interface RawServerEvent {
   side?: Side;
   orderType?: string;
   contractSize?: number;
+  margin?: number;
   leverage?: number;
+  confidence?: number;
   reduceOnly?: boolean;
   takeProfitPrice?: number;
   stopLossPrice?: number;
@@ -374,6 +379,7 @@ export class SignalsClient extends EventEmitter implements SignalsManagerClient 
       size: Math.abs(position.size),
       entryPrice: position.entryPrice,
       markPrice: position.lastPrice,
+      margin: position.margin,
       leverage: position.leverage,
       takeProfitPrice: position.takeProfitPrice,
       stopLossPrice: position.stopLossPrice
@@ -814,7 +820,9 @@ export function parseEvent(raw: string): SignalsEvent {
         side: msg.side ?? "buy",
         orderType: msg.orderType,
         contractSize: msg.contractSize,
+        margin: msg.margin,
         leverage: msg.leverage,
+        confidence: msg.confidence,
         reduceOnly: msg.reduceOnly,
         takeProfitPrice: msg.takeProfitPrice,
         stopLossPrice: msg.stopLossPrice,
