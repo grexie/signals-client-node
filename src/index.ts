@@ -4,6 +4,7 @@ import WebSocket from "ws";
 export type SignalsWebSocketToken = string;
 export type Side = "buy" | "sell";
 
+/** One timeframe contribution to an aggregate public signal. */
 export interface SignalComponent {
   timeframe: string;
   side: Side;
@@ -15,6 +16,7 @@ export interface SignalComponent {
   probability?: number[];
 }
 
+/** Public signal payload emitted by the Grexie Signals websocket. */
 export interface Signal {
   venue: string;
   instrument: string;
@@ -181,8 +183,30 @@ export interface SignalsClientOptions {
   WebSocketCtor?: typeof WebSocket;
 }
 
+/** Router risk settings sent when subscribing to a basket. */
 export interface RiskConfig {
+  /** Fraction of total cash the router may reserve for active positions. Defaults to 1. */
   maxMarginRatio?: number;
+  /** Extra cash buffer applied to lot margin and fees before orders are allowed. Defaults to 0. */
+  minLotHaircutRatio?: number;
+  /** Maximum simultaneous active positions; zero leaves it unset. */
+  maxConcurrentPositions?: number;
+  /** Optional drawdown guard; zero leaves it unset. */
+  maxDrawdown?: number;
+  /** Score buffer required before switching instruments. */
+  switchBuffer?: number;
+  /** Minimum leverage the router may request; zero leaves it unset. */
+  minLeverage?: number;
+  /** Maximum leverage the router may request; zero leaves it unset. */
+  maxLeverage?: number;
+  /** Fraction of profits eligible for withdrawal events. */
+  profitWithdrawRatio?: number;
+}
+
+/** Runtime router risk patch sent after a basket has subscribed. */
+export interface RuntimeConfig {
+  maxMarginRatio?: number;
+  minLotHaircutRatio?: number;
   maxConcurrentPositions?: number;
   maxDrawdown?: number;
   switchBuffer?: number;
@@ -191,10 +215,7 @@ export interface RiskConfig {
   profitWithdrawRatio?: number;
 }
 
-export interface RuntimeConfig {
-  profitWithdrawRatio?: number;
-}
-
+/** Account state for one settlement currency. */
 export interface AssetSnapshot {
   venue?: string;
   currency: string;
@@ -206,6 +227,7 @@ export interface AssetSnapshot {
   updatedAt?: Date | string;
 }
 
+/** Current venue position snapshot for one instrument. */
 export interface Position {
   venue?: string;
   instrument: string;
@@ -232,6 +254,7 @@ export interface Position {
   lastSignalAt?: string | Date;
 }
 
+/** Basket subscription request sent to the server-managed router. */
 export interface SubscribeRequest {
   venue: string;
   instruments: string[];
@@ -242,6 +265,7 @@ export interface SubscribeRequest {
   positions?: Position[];
 }
 
+/** Withdrawal request scheduled against the router basket. */
 export interface WithdrawalRequest {
   venue?: string;
   currency: string;
@@ -249,6 +273,7 @@ export interface WithdrawalRequest {
   reason?: string;
 }
 
+/** Configuration for one SignalsManager basket. */
 export interface SignalsManagerConfig {
   venue?: string;
   instruments?: string[];
@@ -257,6 +282,7 @@ export interface SignalsManagerConfig {
   profitWithdrawRatio?: number;
 }
 
+/** Durable SignalsManager state for restart hydration. */
 export interface SignalsManagerState {
   assets?: AssetSnapshot[];
   positions?: Position[];
@@ -264,6 +290,7 @@ export interface SignalsManagerState {
 
 export type Intent = CreateMarketOrderEvent;
 
+/** Transport contract used by SignalsManager. */
 export interface SignalsManagerClient extends SignalEventSource {
   subscribeBasket(request: SubscribeRequest): void;
   unsubscribe(subscriptionId: number): void;
@@ -322,6 +349,10 @@ export class SignalsClient extends EventEmitter implements SignalsManagerClient 
   private readonly waiters: Waiter[] = [];
   private terminalError?: Error;
 
+  /** Create a websocket client.
+   * @param token Bearer token used for websocket authentication.
+   * @param options Optional websocket URL, base URL, headers, and constructor overrides.
+   */
   constructor(token: SignalsWebSocketToken, options: SignalsClientOptions = {}) {
     super();
     this.token = token;
@@ -332,6 +363,7 @@ export class SignalsClient extends EventEmitter implements SignalsManagerClient 
     };
   }
 
+  /** Open the websocket connection. */
   connect(): Promise<void> {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       return Promise.resolve();
@@ -351,23 +383,39 @@ export class SignalsClient extends EventEmitter implements SignalsManagerClient 
     });
   }
 
+  /** Close the websocket connection. */
   close(): void {
     this.ws?.close();
     this.ws = undefined;
   }
 
+  /** Subscribe to a legacy single-instrument stream.
+   * @param venue Venue code.
+   * @param instrument Instrument symbol.
+   */
   subscribe(venue: string, instrument: string): void {
     this.send({ type: "subscribe", venue, instrument });
   }
 
+  /** Subscribe to a server-managed router basket.
+   * @param request Basket subscription request, including instruments, risk, assets, and positions.
+   */
   subscribeBasket(request: SubscribeRequest): void {
-    this.send({ type: "subscribe", ...request });
+    this.send({ type: "subscribe", ...request, risk: normalizeRiskConfig(request.risk ?? {}) });
   }
 
+  /** Publish an account asset snapshot.
+   * @param subscriptionId Server subscription id.
+   * @param asset Asset snapshot to send.
+   */
   updateAsset(subscriptionId: number, asset: AssetSnapshot): void {
     this.send({ type: "update-asset", subscriptionId, ...asset });
   }
 
+  /** Publish a venue position snapshot.
+   * @param subscriptionId Server subscription id.
+   * @param position Position snapshot to send.
+   */
   updatePosition(subscriptionId: number, position: Position): void {
     this.send({
       type: "update-position",
@@ -386,30 +434,37 @@ export class SignalsClient extends EventEmitter implements SignalsManagerClient 
     });
   }
 
+  /** Add an instrument to an existing basket subscription. */
   addInstrument(subscriptionId: number, instrument: string): void {
     this.send({ type: "add-instrument", subscriptionId, instrument });
   }
 
+  /** Remove an instrument from an existing basket subscription. */
   removeInstrument(subscriptionId: number, instrument: string): void {
     this.send({ type: "remove-instrument", subscriptionId, instrument });
   }
 
+  /** Send a runtime router config patch. */
   updateConfig(subscriptionId: number, config: RuntimeConfig): void {
     this.send({ type: "update-config", subscriptionId, ...config });
   }
 
+  /** Schedule a withdrawal request for the router subscription. */
   scheduleWithdrawal(subscriptionId: number, withdrawal: WithdrawalRequest): void {
     this.send({ type: "schedule-withdrawal", subscriptionId, ...withdrawal });
   }
 
+  /** Unsubscribe by server subscription id. */
   unsubscribe(subscriptionId: number): void {
     this.send({ type: "unsubscribe", subscriptionId });
   }
 
+  /** Unsubscribe a legacy single-instrument stream. */
   unsubscribeInstrument(venue: string, instrument: string): void {
     this.send({ type: "unsubscribe", venue, instrument });
   }
 
+  /** Wait for the next typed websocket event. */
   receive(signal?: AbortSignal): Promise<SignalsEvent> {
     const queued = this.queue.shift();
     if (queued) {
@@ -435,6 +490,7 @@ export class SignalsClient extends EventEmitter implements SignalsManagerClient 
     });
   }
 
+  /** Yield an independent stream of typed websocket events. */
   async *events(signal?: AbortSignal): AsyncIterableIterator<SignalsEvent> {
     const queue: SignalsEvent[] = [];
     let wake: (() => void) | undefined;
@@ -552,6 +608,11 @@ export class SignalsManager extends EventEmitter {
   private readonly assetsByCurrency = new Map<string, AssetSnapshot>();
   private readonly positionsByKey = new Map<string, Position>();
 
+  /** Create a basket manager.
+   * @param client Transport used to talk to the Signals websocket.
+   * @param state Optional durable state from a previous run.
+   * @param config Basket subscription config.
+   */
   constructor(client: SignalsManagerClient, state: SignalsManagerState = {}, config: SignalsManagerConfig = {}) {
     super();
     this.client = client;
@@ -564,6 +625,7 @@ export class SignalsManager extends EventEmitter {
     }
   }
 
+  /** Subscribe, process events until the stream ends, then unsubscribe. */
   async run(signal?: AbortSignal): Promise<void> {
     this.subscribe();
     try {
@@ -578,18 +640,20 @@ export class SignalsManager extends EventEmitter {
     }
   }
 
+  /** Subscribe the configured basket and send current snapshots. */
   subscribe(): void {
     this.client.subscribeBasket({
       venue: this.cfg.venue,
       instruments: [...this.cfg.instruments],
       mode: this.cfg.mode || undefined,
-      risk: Object.keys(this.cfg.risk).length > 0 ? this.cfg.risk : undefined,
+      risk: this.cfg.risk,
       profitWithdrawRatio: this.cfg.profitWithdrawRatio || undefined,
       assets: this.assets(),
       positions: this.positions()
     });
   }
 
+  /** Record and, once subscribed, send an account asset snapshot. */
   updateAsset(asset: AssetSnapshot): void {
     const next = this.recordAsset(asset);
     if (next && this.subscriptionId > 0) {
@@ -597,6 +661,7 @@ export class SignalsManager extends EventEmitter {
     }
   }
 
+  /** Record and, once subscribed, send a venue position snapshot. */
   updatePosition(position: Position): void {
     const next = this.recordPosition(position);
     if (next && this.subscriptionId > 0) {
@@ -604,6 +669,7 @@ export class SignalsManager extends EventEmitter {
     }
   }
 
+  /** Add an instrument locally and to the live subscription. */
   addInstrument(instrument: string): void {
     const normalized = normalizeInstrument(instrument);
     if (!normalized) return;
@@ -613,6 +679,7 @@ export class SignalsManager extends EventEmitter {
     }
   }
 
+  /** Remove an instrument locally and from the live subscription. */
   removeInstrument(instrument: string): void {
     const normalized = normalizeInstrument(instrument);
     this.cfg.instruments = this.cfg.instruments.filter((current) => current !== normalized);
@@ -621,13 +688,17 @@ export class SignalsManager extends EventEmitter {
     }
   }
 
+  /** Apply and optionally send a runtime router config patch. */
   updateConfig(config: RuntimeConfig): void {
-    this.cfg.profitWithdrawRatio = clamp01(config.profitWithdrawRatio ?? 0);
+    const runtime = normalizeRuntimeConfig(config);
+    this.cfg.risk = applyRuntimeConfigToRisk(this.cfg.risk, runtime);
+    this.cfg.profitWithdrawRatio = runtime.profitWithdrawRatio ?? 0;
     if (this.subscriptionId > 0) {
-      this.client.updateConfig(this.subscriptionId, { profitWithdrawRatio: this.cfg.profitWithdrawRatio });
+      this.client.updateConfig(this.subscriptionId, runtime);
     }
   }
 
+  /** Schedule a withdrawal through the live router subscription. */
   scheduleWithdrawal(withdrawal: WithdrawalRequest): void {
     if (this.subscriptionId <= 0) {
       throw new Error("signals-client: basket is not subscribed");
@@ -639,27 +710,33 @@ export class SignalsManager extends EventEmitter {
     });
   }
 
+  /** Return the active server subscription id, or 0 before subscribe. */
   subscription(): number {
     return this.subscriptionId;
   }
 
+  /** Return asset snapshots sorted by currency. */
   assets(): AssetSnapshot[] {
     return [...this.assetsByCurrency.values()].sort((a, b) => a.currency.localeCompare(b.currency));
   }
 
+  /** Return open position snapshots sorted by venue/instrument. */
   positions(): Position[] {
     return [...this.positionsByKey.values()].sort((a, b) => positionKey(a.venue, a.instrument).localeCompare(positionKey(b.venue, b.instrument)));
   }
 
+  /** Return available cash after applying the asset maxUsage cap. */
   availableOrderCash(currency: string): number {
     const asset = this.assetsByCurrency.get(currency.trim().toUpperCase());
     return Math.max(0, asset?.available ?? 0) * clamp01(positiveOr(asset?.maxUsage, 1));
   }
 
+  /** Return durable state suitable for restart hydration. */
   state(): SignalsManagerState {
     return { assets: this.assets(), positions: this.positions() };
   }
 
+  /** Apply one typed websocket event to the manager. */
   handleEvent(event: SignalsEvent): void {
     if (!this.acceptsEvent(event)) return;
     if (event.type === "subscribed" && event.subscriptionId > 0) {
@@ -750,6 +827,7 @@ export class SignalsManager extends EventEmitter {
   }
 }
 
+/** Parse one raw websocket JSON message into a typed event. */
 export function parseEvent(raw: string): SignalsEvent {
   const msg = JSON.parse(raw) as RawServerEvent;
   switch (msg.type) {
@@ -876,9 +954,51 @@ function normalizeSignalsManagerConfig(config: SignalsManagerConfig): Required<S
     venue: normalizeVenue(config.venue || "okx"),
     instruments: normalizeInstrumentList(config.instruments ?? []),
     mode: config.mode?.trim() ?? "",
-    risk: config.risk ?? {},
+    risk: normalizeRiskConfig(config.risk ?? {}),
     profitWithdrawRatio: clamp01(config.profitWithdrawRatio ?? 0)
   };
+}
+
+function normalizeRiskConfig(risk: RiskConfig): Required<RiskConfig> {
+  const maxLeverage = Math.max(0, risk.maxLeverage ?? 0);
+  return {
+    maxMarginRatio: clamp01(positiveOr(risk.maxMarginRatio, 1)),
+    minLotHaircutRatio: Math.max(0, finiteOr(risk.minLotHaircutRatio, 0)),
+    maxConcurrentPositions: Math.max(0, Math.trunc(finiteOr(risk.maxConcurrentPositions, 0))),
+    maxDrawdown: Math.max(0, finiteOr(risk.maxDrawdown, 0)),
+    switchBuffer: Math.max(0, finiteOr(risk.switchBuffer, 0)),
+    minLeverage: maxLeverage > 0 ? Math.min(Math.max(0, finiteOr(risk.minLeverage, 0)), maxLeverage) : Math.max(0, finiteOr(risk.minLeverage, 0)),
+    maxLeverage,
+    profitWithdrawRatio: clamp01(risk.profitWithdrawRatio ?? 0)
+  };
+}
+
+function normalizeRuntimeConfig(config: RuntimeConfig): Required<RuntimeConfig> {
+  const maxLeverage = Math.max(0, finiteOr(config.maxLeverage, 0));
+  return {
+    maxMarginRatio: clamp01(config.maxMarginRatio ?? 0),
+    minLotHaircutRatio: Math.max(0, finiteOr(config.minLotHaircutRatio, 0)),
+    maxConcurrentPositions: Math.max(0, Math.trunc(finiteOr(config.maxConcurrentPositions, 0))),
+    maxDrawdown: Math.max(0, finiteOr(config.maxDrawdown, 0)),
+    switchBuffer: Math.max(0, finiteOr(config.switchBuffer, 0)),
+    minLeverage: maxLeverage > 0 ? Math.min(Math.max(0, finiteOr(config.minLeverage, 0)), maxLeverage) : Math.max(0, finiteOr(config.minLeverage, 0)),
+    maxLeverage,
+    profitWithdrawRatio: clamp01(config.profitWithdrawRatio ?? 0)
+  };
+}
+
+function applyRuntimeConfigToRisk(risk: RiskConfig, config: RuntimeConfig): Required<RiskConfig> {
+  return normalizeRiskConfig({
+    ...risk,
+    ...(config.maxMarginRatio && config.maxMarginRatio > 0 ? { maxMarginRatio: config.maxMarginRatio } : {}),
+    ...(config.minLotHaircutRatio && config.minLotHaircutRatio > 0 ? { minLotHaircutRatio: config.minLotHaircutRatio } : {}),
+    ...(config.maxConcurrentPositions && config.maxConcurrentPositions > 0 ? { maxConcurrentPositions: config.maxConcurrentPositions } : {}),
+    ...(config.maxDrawdown && config.maxDrawdown > 0 ? { maxDrawdown: config.maxDrawdown } : {}),
+    ...(config.switchBuffer && config.switchBuffer > 0 ? { switchBuffer: config.switchBuffer } : {}),
+    ...(config.minLeverage && config.minLeverage > 0 ? { minLeverage: config.minLeverage } : {}),
+    ...(config.maxLeverage && config.maxLeverage > 0 ? { maxLeverage: config.maxLeverage } : {}),
+    profitWithdrawRatio: config.profitWithdrawRatio ?? 0
+  });
 }
 
 function normalizeVenue(venue?: string): string {
@@ -921,4 +1041,8 @@ function positiveOr(...values: Array<number | undefined>): number {
     if (value !== undefined && Number.isFinite(value) && value > 0) return value;
   }
   return 0;
+}
+
+function finiteOr(value: number | undefined, fallback: number): number {
+  return value !== undefined && Number.isFinite(value) ? value : fallback;
 }
